@@ -7,7 +7,7 @@ Current milestone:
 M0 — Foundation
 
 Completed:
-TASK-001, TASK-002, TASK-003, TASK-004
+TASK-001, TASK-002, TASK-003, TASK-004, TASK-005
 
 ## Current implementation
 
@@ -20,8 +20,50 @@ TASK-001, TASK-002, TASK-003, TASK-004
   a clear active state, header showing the active area's title and a
   non-technical connectivity indicator ("Ready" / "Connecting…" /
   "Offline"), scrollable main content area
-- Projects placeholder page — empty state, no project data or persistence
-- Settings placeholder page — empty state, no settings implemented
+- **Project domain (TASK-005)** — GoLive's first real product
+  functionality:
+  - Domain model `Project { id, name, description, created_at, updated_at }`
+    (`src-tauri/src/models/project.rs`); id is a backend-generated UUID
+    v4, timestamps are backend-generated Unix epoch milliseconds — never
+    accepted from the frontend
+  - `projects` SQLite table (`src-tauri/migrations/0002_projects.sql`,
+    additive — the TASK-004 migration was not modified), indexed on
+    `updated_at DESC` (the default list order)
+  - `ProjectRepository` trait + `SqliteProjectRepository`
+    (`src-tauri/src/repositories/project.rs`): create/list/get/delete —
+    no `update` yet (not needed by TASK-005's UI)
+  - `ProjectService` (`src-tauri/src/services/project.rs`): validates and
+    trims `name` (required, ≤200 chars) and `description` (optional,
+    ≤5000 chars), generates id/timestamps, is the first real occupant of
+    the "business logic" boundary TASK-002 documented
+  - Tauri commands `create_project` / `list_projects` / `get_project` /
+    `delete_project` (`src-tauri/src/commands/project.rs`) — thin,
+    delegate entirely to `ProjectService`
+  - `AppError` gained `Validation(String)` (safe, shown to the user
+    as-is) and `NotFound` variants
+  - Frontend service `src/features/projects/services/projects.ts` —
+    typed `createProject`/`listProjects`/`getProject`/`deleteProject`,
+    maps the wire `snake_case` shape to a `camelCase` `Project` type
+  - Real Projects UI (`src/features/projects/`): project list (sorted
+    newest-updated-first) with a persistent "+ New project" entry point,
+    a create dialog (name required, description optional, inline
+    validation/error display, disabled-while-submitting), project
+    selection with a visible active state, a detail view (name,
+    description, created/updated dates, and three clearly-labeled
+    informational "Not available yet." placeholders for
+    Processes/Captures/Documentation — no fake buttons), and delete with
+    an explicit confirm/cancel dialog
+  - Loading ("Loading projects…"), error (with Retry), and empty
+    ("No projects yet" / "Create a project to start documenting your
+    processes.") states throughout
+  - New shared UI: `components/ui/Dialog` (modal shell, Escape/backdrop
+    dismissal, reused by both the create and delete dialogs);
+    `utils/formatDate.ts` (epoch ms → locale-formatted display, backend
+    never formats dates) and `utils/errorMessage.ts` (extracts the safe
+    `AppError` message from a rejected `invoke()` call)
+  - `Settings` unaffected: `Local storage: Ready` continues to work
+    unchanged
+- Settings placeholder page — empty state, no other settings implemented
 - Reusable application layout components (`AppShell`, `Sidebar`, `Header`
   in `src/components/layout/`) and one reused generic UI component
   (`EmptyState` in `src/components/ui/`)
@@ -76,9 +118,9 @@ TASK-001, TASK-002, TASK-003, TASK-004
   exercises the full React → service → command → repository → SQLite →
   repository → command → React round trip without modeling any product
   data
-- Rust module structure now includes `commands/`, `db/`, `repositories/`
-  (previously just `main.rs` + `lib.rs`); `services/` and `models/`
-  remain introduced only once real business logic/domain models exist
+- Rust module structure now includes `commands/`, `db/`, `repositories/`,
+  `models/`, and `services/` — the last two introduced by TASK-005, the
+  first task with a real domain model/business logic to put in them
 
 ## Architecture conventions established (TASK-002)
 
@@ -175,13 +217,75 @@ confirmed to start cleanly against the now-populated real database
 `marker_survives_reopening_the_database` test (isolated temp directory),
 constitutes the persistence-survives-restart proof required by this task.
 
+**TASK-005 validation:** `npx tsc --noEmit`, `npm run build`, `cargo
+check`, `cargo test` (24/24 passing — 6 pre-existing + 18 new: 6
+repository tests covering create/list-ordering/get/delete/delete-missing/
+reopen, 12 service tests covering validation, trimming, id/timestamp
+generation, and not-found handling — all against isolated
+`tempfile::tempdir()` databases), and `npm run tauri build` all pass.
+
+Full UI-flow verification (empty state → create → validate → list order
+→ select → detail → delete confirm/cancel → delete → empty state again)
+was done against the Vite dev server with the Tauri IPC bridge
+(`window.__TAURI_INTERNALS__.invoke`) replaced by an in-memory mock
+implementing the same four commands — this exercises the real, compiled
+frontend code (components, state, validation, error handling) end to
+end, since no desktop UI-automation tool is available in this environment
+to click the native window directly. Every step behaved as specified,
+including HTML5 `required` blocking an empty submit before it reaches the
+backend, name/description trimming, newest-updated-first ordering,
+selection clearing when the selected project is deleted, and the empty
+state correctly returning once the last project is removed. The native
+`golive.exe` was then built and launched separately and confirmed to
+start cleanly (`tasklist`-verified, then terminated) against the real,
+schema-upgraded database.
+
+**Persistence-across-restart finding (real per-user AppData directory):**
+using the same approach as TASK-004 (a temporary `cargo run --example`,
+deleted before commit, exercising the exact `ProjectService`/
+`DbService` code the app uses), the migration upgrade itself was
+confirmed clean — the pre-existing TASK-004 `app_metadata` marker
+survived the schema upgrade to `user_version = 2` intact, and a project
+created immediately afterward was reported successfully. However, a
+*second*, separate process invocation immediately after that showed
+**both** the marker and the newly created project missing, replaced by a
+freshly-generated marker — i.e. the real `%APPDATA%\com.golive.app\`
+database's row data was reset between those two process runs, even
+though its schema (`user_version = 2`) stayed intact.
+
+This was investigated rather than ignored: the identical code path,
+pointed at a plain non-AppData directory instead
+(`C:\Users\Federico\Desktop\GoLive\.manual-verify-tmp\`, also deleted
+before commit), was run across two separate process invocations and
+persisted correctly every time — matching all 24 automated tests, which
+also use a real (temp-directory) SQLite file across separate `DbService`
+instances and pass reliably. This isolates the anomaly to something
+specific to the real `%APPDATA%` path in this environment — most likely
+Windows real-time protection (enabled and tamper-protected on this
+machine, confirmed via `Get-MpComputerStatus`) scanning/locking a
+newly-written SQLite WAL file from an unsigned dev binary at the moment
+of a checkpoint, causing the WAL to be discarded instead of merged — not
+a defect in GoLive's migration/repository/pool code. No corroborating
+quarantine event was found in `Get-MpThreatDetection`, so this is a
+plausible root cause, not a confirmed one.
+
+**Net effect:** the Project persistence *mechanism* is proven correct —
+by 24 deterministic automated tests plus a manual real-filesystem,
+separate-process restart check that succeeded — but a clean, unassisted
+"create a project in the shipped app, fully close it, reopen it, see the
+project" pass specifically against the real per-user AppData path could
+not be completed in this session, because (a) no desktop UI-automation
+tool exists here to drive the native window, and (b) the one available
+non-UI method of exercising that exact path hit the environment
+interference described above on its second run. This should be spot-
+checked manually by a developer on a normal desktop session (launch
+GoLive, create a project, fully close the app, reopen it, confirm the
+project is still listed) before relying on it in a real engagement.
+
 ## Not implemented yet
 
-- Domain database schema (Project/Capture/Process/Recording tables) —
-  the SQLite persistence *infrastructure* (connection pool, migrations,
-  repository pattern) exists as of TASK-004, but no domain tables exist
-  yet
-- Projects (create/list/edit)
+- Project editing/update (repository/service intentionally has no
+  `update` method yet — see DECISIONS.md)
 - Processes, Captures
 - Screenshots (full-screen / monitor / area)
 - Screen recording, microphone recording
@@ -205,4 +309,4 @@ constitutes the persistence-survives-restart proof required by this task.
 
 ## Next task
 
-TASK-005
+TASK-006

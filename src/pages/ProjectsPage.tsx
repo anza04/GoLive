@@ -1,22 +1,8 @@
-import { EmptyState } from "../components/ui/EmptyState";
+import { ProjectsView } from "../features/projects/ProjectsView";
 
-/** Placeholder Projects area. No project data exists yet — see
- * PROJECT_STATE.md for what's still pending (SQLite, project CRUD). */
+/** Routed entry point for the Projects area. All real state/logic lives
+ * in the `projects` feature — this page only composes it (see
+ * docs/architecture.md, "Current frontend structure"). */
 export function ProjectsPage() {
-  return (
-    <EmptyState
-      title="No projects yet"
-      description="Your GoLive projects will appear here."
-      action={
-        <button
-          type="button"
-          className="button"
-          disabled
-          title="Project creation isn't available yet"
-        >
-          New Project
-        </button>
-      }
-    />
-  );
+  return <ProjectsView />;
 }

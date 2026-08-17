@@ -1,7 +1,9 @@
 mod commands;
 mod db;
 mod errors;
+mod models;
 mod repositories;
+mod services;
 
 use tauri::Manager;
 
@@ -20,6 +22,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::foundation::check_foundation_status,
             commands::storage::get_local_storage_status,
+            commands::project::create_project,
+            commands::project::list_projects,
+            commands::project::get_project,
+            commands::project::delete_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

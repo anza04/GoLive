@@ -2,7 +2,9 @@
 
 Top-level views that compose components into full screens.
 
-- `ProjectsPage.tsx` — placeholder empty state; no project data exists yet.
+- `ProjectsPage.tsx` — thin wrapper composing the `projects` feature
+  (`features/projects/ProjectsView.tsx`), which owns the real list/
+  create/select/delete state.
 - `SettingsPage.tsx` — placeholder empty state; no settings exist yet.
 
 Pages compose `components/` and stay free of business logic and Tauri

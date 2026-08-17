@@ -74,10 +74,15 @@ Conventions per folder:
 
 **Current contents:** `App.tsx` composes the application shell (see §16).
 `components/layout/` holds `AppShell`, `Sidebar`, `Header`; `components/ui/`
-holds the one generic piece reused so far, `EmptyState`. `pages/` holds
-`ProjectsPage` and `SettingsPage` (both placeholders — no data). `types/`
-holds `navigation.ts`. `services/foundation.ts` is still the only Tauri
-wrapper. `stores/` and `utils/` remain empty — nothing needs them yet.
+holds the generic pieces reused across the app so far — `EmptyState`,
+`StatusPill`, `Dialog`. `pages/ProjectsPage.tsx` is now a thin wrapper
+around the real `features/projects/` feature (see §18);
+`pages/SettingsPage.tsx` is still a placeholder. `types/` holds
+`navigation.ts`. `services/` holds the app-level Tauri wrappers
+(`foundation.ts`, `storage.ts`); `features/projects/services/projects.ts`
+holds the feature-specific ones. `utils/` holds `formatDate.ts` and
+`errorMessage.ts`. `stores/` remains empty — nothing needs it yet (see
+§11).
 
 ## 3. Current Rust/Tauri structure
 
@@ -87,6 +92,7 @@ wrapper. `stores/` and `utils/` remain empty — nothing needs them yet.
 src-tauri/
   migrations/
     0001_initial.sql        infrastructure-only migration (see §17)
+    0002_projects.sql        Project domain schema (see §18)
   src/
     main.rs                 entry point
     lib.rs                  Tauri builder, .setup() hook, command registration
@@ -94,30 +100,28 @@ src-tauri/
     commands/
       foundation.rs           check_foundation_status
       storage.rs               get_local_storage_status
+      project.rs                create/list/get/delete_project (see §18)
     db/
       mod.rs                   DbService: init, pool access
       pool.rs                  r2d2 pool construction + PRAGMAs
       migrations.rs            migration runner
+    models/
+      project.rs                Project struct (see §18)
     repositories/
       storage_status.rs        StorageStatusRepository trait +
                                 SqliteStorageStatusRepository
+      project.rs                 ProjectRepository trait +
+                                  SqliteProjectRepository (see §18)
+    services/
+      project.rs                 ProjectService: validation, id/timestamp
+                                  generation (see §18)
 ```
 
-`commands/`, `db/`, and `repositories/` were introduced by TASK-004 — the
-first modules with enough real content to justify splitting out of
-`lib.rs`. There is still no `services/` (no business/domain logic exists
-yet — `db::DbService` is infrastructure, not domain logic) and no
-`models/` (no domain structs like `Project` exist yet). Both are
-introduced when the first real business logic/domain model needs them
-(expected TASK-005).
-
-**FUTURE:**
-
-- **`services/`** — Application/business logic. Pure Rust, independently
-  testable, no direct knowledge of Tauri's `invoke` plumbing or of
-  `repositories/` beyond the trait it depends on.
-- **`models/`** — Domain/data structures shared across backend logic
-  (`Project`, `Process`, `Capture`, ...).
+`commands/`, `db/`, and `repositories/` were introduced by TASK-004.
+`models/` and `services/` were introduced by TASK-005, once the Project
+domain gave them real content — `db::DbService` was always
+infrastructure, not domain logic, so it didn't count as a reason to add
+`services/` on its own; `ProjectService` is the first actual occupant.
 
 ## 4. Frontend → Tauri communication
 
@@ -145,20 +149,27 @@ service function, which is the only place `invoke()` appears.
 - Not tied to a specific feature → `src/services/`.
 - Belongs to one feature → `features/<feature>/services/`.
 
-**Concrete examples (both app-level, no feature exists yet):**
-- `App.tsx` calls `checkFoundationStatus()` from
+**Concrete examples:**
+- App-level (no feature): `App.tsx` calls `checkFoundationStatus()` from
   [`src/services/foundation.ts`](../src/services/foundation.ts) →
   `invoke("check_foundation_status")` →
   [`commands::foundation::check_foundation_status`](../src-tauri/src/commands/foundation.rs).
   Infallible, no persistence — no application-service/repository step was
   added around it, since none would do anything.
-- `SettingsPage` calls `getLocalStorageStatus()` from
+- App-level: `SettingsPage` calls `getLocalStorageStatus()` from
   [`src/services/storage.ts`](../src/services/storage.ts) →
   `invoke("get_local_storage_status")` →
   [`commands::storage::get_local_storage_status`](../src-tauri/src/commands/storage.rs),
-  which goes through `SqliteStorageStatusRepository` (§17) — this one
-  *is* fallible (`Result<T, AppError>`, §10) and does reach a repository,
-  since it's the first command that genuinely needs one.
+  which goes through `SqliteStorageStatusRepository` (§17) — fallible
+  (`Result<T, AppError>`, §10) and reaches a repository.
+- Feature-specific (TASK-005, the first one): `ProjectsView` calls
+  `createProject()`/`listProjects()`/etc. from
+  [`features/projects/services/projects.ts`](../src/features/projects/services/projects.ts)
+  → `invoke("create_project")` etc. →
+  [`commands::project`](../src-tauri/src/commands/project.rs) →
+  `ProjectService` → `ProjectRepository` — the full chain §18 documents
+  in detail, and the reason the `features/<feature>/services/` half of
+  this rule exists at all.
 
 ## 5. Business logic boundary
 
@@ -166,8 +177,14 @@ service function, which is the only place `invoke()` appears.
 command handlers, once those exist beyond trivial delegation). They live in
 Rust application services (see §3), independently of the UI.
 
-Examples of rules that will apply this boundary later (none are
-implemented yet):
+**CURRENT, first real occupant (TASK-005):** `ProjectService::create`
+trims and validates `name`/`description` and generates the id/timestamps
+— this logic lives there, not in `commands::project` (which just
+delegates) and not in the frontend (which sends raw, untrimmed input and
+lets the backend be the source of truth). See §18.
+
+Examples of rules that will apply this boundary later, not implemented
+yet:
 - "A Capture belongs to zero or one Process."
 - "AI-generated process regeneration must not silently overwrite a
   previous process version."
@@ -177,17 +194,17 @@ render/relay the result — it should not itself decide what the rule is.
 
 ## 6. Persistence boundary
 
-**CURRENT (infrastructure only, established TASK-004).** SQLite
-persistence infrastructure exists — connection pool, migrations, one
-repository — but no domain data (Project, Process, Capture, ...) yet.
-See §17 for the full detail.
+**CURRENT.** SQLite persistence infrastructure (TASK-004) now has its
+first real domain occupant: the Project entity (TASK-005). See §17 for
+the infrastructure and §18 for the Project-specific detail.
 
 ```
-Application/domain logic (Rust)     [domain logic itself: FUTURE, TASK-005+]
+Application/domain logic (Rust)     CURRENT — ProjectService (§18)
         ↓
-Repository interface (Rust trait)   CURRENT — StorageStatusRepository
-        ↓
-SQLite implementation               CURRENT — SqliteStorageStatusRepository
+Repository interface (Rust trait)   CURRENT — StorageStatusRepository,
+        ↓                                     ProjectRepository
+SQLite implementation               CURRENT — SqliteStorageStatusRepository,
+                                                SqliteProjectRepository
 ```
 
 The frontend never knows SQLite exists — it only ever calls a Tauri
@@ -242,8 +259,13 @@ commands.
 - `AppError` (`thiserror`-derived) has one variant per failure category
   the app currently has: `Storage` (app-data directory / connection
   issues), `Database` (query/repository failures), `Migration` (schema
-  migration failures). Each carries a fixed, generic, user-safe message —
-  never a raw underlying error.
+  migration failures), `Validation(String)` (TASK-005 — an
+  author-written, safe, specific message like "Project name is
+  required.", the one variant whose message *is* shown to the user
+  as-is, since it's never a raw underlying error), `NotFound` (TASK-005 —
+  `get`/`delete` by an id that doesn't exist). Every other variant
+  carries a fixed, generic, user-safe message — never a raw underlying
+  error.
 - `AppError` implements `serde::Serialize` by hand, always producing
   `{ "code": "...", "message": "..." }` for the frontend — the code is a
   stable machine-readable string (e.g. `"database_error"`), the message is
@@ -276,20 +298,29 @@ exists.
 
 ## 11. State management
 
-**CURRENT:** `App.tsx` uses local component state (`useState`) for its
-connectivity status — the only state in the application. No state
+**CURRENT:** `App.tsx` still uses local component state (`useState`) for
+connectivity status. The Project feature (TASK-005) added its own local
+state, all in `features/projects/ProjectsView.tsx`: the project list,
+loading/error status, which dialog (if any) is open, and — the first real
+example of "feature state" — **which project is selected**. No state
 management library is installed.
 
 **Rule:**
 - **Local UI state** (modal open/closed, form fields, a single component's
   status) → local component state (`useState`/`useReducer`). Default
-  choice.
-- **Feature state** (e.g. future active-recording state, process-editor
-  state) → owned within that feature, introduced only once the feature
-  needs it.
-- **Application state** (e.g. future current project, global settings) →
-  `src/stores/`, introduced only once at least two features genuinely need
-  to share it.
+  choice. Example: `CreateProjectDialog`'s form fields and submitting
+  flag.
+- **Feature state** (e.g. selected project, future active-recording
+  state, process-editor state) → owned within that feature, introduced
+  only once the feature needs it. Example: `selectedId` in
+  `ProjectsView` — deliberately just a `useState<string | null>`, so if a
+  future feature (e.g. a floating widget) needs to know the current
+  project too, this is a same-shape swap into a `stores/` slice, not a
+  rewrite.
+- **Application state** (e.g. future global settings) → `src/stores/`,
+  introduced only once at least two features genuinely need to share it.
+  Still empty — selected-project state doesn't qualify yet, since only
+  the Projects feature reads it.
 
 No state management library is adopted by this task. If/when `stores/`
 state is actually needed, the simplest option that fits (React context, or
@@ -321,7 +352,9 @@ permissions are requested.
 global shortcuts, microphone, screen capture, HTTP for the AI provider,
 etc.) is added only in the task that implements the corresponding
 functionality, scoped as narrowly as Tauri allows for that feature. No
-capability is granted ahead of the code that needs it.
+capability is granted ahead of the code that needs it. The Project
+commands (TASK-005) needed none of these — they only touch the already-
+managed SQLite connection — so capabilities are unchanged.
 
 CSP is currently `null` (framework default). It will be tightened once the
 app's actual resource-loading needs (fonts, local media, any remote calls)
@@ -364,6 +397,7 @@ working one just to shrink the list.
 | `rusqlite` (`bundled`) | Embedded SQLite bindings. `bundled` statically compiles SQLite into the binary — no system SQLite install required (see §17, DECISIONS.md). |
 | `r2d2`, `r2d2_sqlite` (`bundled`) | Connection pool for `rusqlite`, so one long-running database operation doesn't block every other one (see §17, "Concurrency"). |
 | `thiserror` | Derives `AppError`'s `Display`/`std::error::Error` impl (§10) with minimal boilerplate. |
+| `uuid` (`v4`) | Generates `Project` ids (§18). Already an indirect dependency of the toolchain; added as a direct one now that our own code (`ProjectService`) actually calls it. |
 
 **Dev-only:** `tempfile` — isolated temp directories for the database
 tests (§17), never touching the real per-user app-data directory.
@@ -382,12 +416,14 @@ removed — see DECISIONS.md for why) and `sqlx` (evaluated and not chosen
   non-technical connectivity indicator). Each is presentation-only and
   owns no navigation or connectivity state itself — that's passed in as
   props by `App.tsx`.
-- **Generic reusable UI** (`src/components/ui/`): currently just
-  `EmptyState`, reused by both placeholder pages. New components go here
-  only once actually reused (see §2's `components/` convention).
-- **Pages** (`src/pages/`): `ProjectsPage.tsx` and `SettingsPage.tsx`,
-  both empty-state placeholders — no data, no persistence, no business
-  logic.
+- **Generic reusable UI** (`src/components/ui/`): `EmptyState`,
+  `StatusPill`, `Dialog` (the latter two added in TASK-004/005 — see §17,
+  §18). New components go here only once actually reused (see §2's
+  `components/` convention).
+- **Pages** (`src/pages/`): `SettingsPage.tsx` is still an empty-state
+  placeholder; `ProjectsPage.tsx` is now a thin wrapper around the real
+  `features/projects/` feature (§18) — pages stay free of business logic
+  either way.
 - **Navigation:** `App.tsx` owns `activeView` (`useState<AppView>`,
   `AppView`/`NavItem` defined in `src/types/navigation.ts`) and passes it
   and a setter down to `Sidebar` and `Header` as props — no store needed
@@ -517,9 +553,131 @@ the seam a remote implementation would sit behind; `DbService` and
 `SqliteStorageStatusRepository` are the only things that would be
 replaced, not the commands or the frontend.
 
+## 18. Project domain (TASK-005)
+
+**CURRENT.** The first real GoLive domain entity — the top-level
+container future Processes/Captures/Screenshots/Recordings/generated
+documentation will belong to (via a `project_id` foreign key, once those
+tables exist — not yet).
+
+**Model** (`src-tauri/src/models/project.rs`): `Project { id, name,
+description, created_at, updated_at }`.
+- `id`: a `Uuid::new_v4()` string, generated by `ProjectService` — never
+  accepted from the frontend. The frontend never generates database IDs.
+- `created_at`/`updated_at`: Unix epoch **milliseconds**, UTC, generated
+  by the backend — never accepted from the frontend. `created_at` is set
+  once and never changes; `updated_at` would be bumped by a future
+  `update` operation (not implemented — see below).
+
+**Full flow (the concrete instantiation of the pattern §4–§6 describe):**
+
+```
+Projects UI (features/projects/)
+    ↓
+frontend project service     features/projects/services/projects.ts
+    ↓
+Tauri invoke()
+    ↓
+Tauri command                 commands::project (create/list/get/delete_project)
+    ↓
+ProjectService                 services::project — validation, id/timestamp
+    ↓                                              generation, business rules
+ProjectRepository (trait)      repositories::project
+    ↓
+SqliteProjectRepository        all Project SQL lives here, nowhere else
+    ↓
+SQLite (projects table)
+```
+
+**Repository** (`repositories/project.rs`): `ProjectRepository` trait —
+`create`, `list` (ordered `updated_at DESC`), `get`, `delete` (returns
+whether a row actually existed, so the service can distinguish "deleted"
+from "not found") — plus `SqliteProjectRepository`, the only
+implementation. **No `update` yet** — TASK-005's UI only needs
+create/list/get/delete; the trait/impl shape doesn't need to change to
+add one later, it's just one more method.
+
+**Service** (`services/project.rs`): `ProjectService::create` trims
+`name`/`description`, rejects an empty (post-trim) name, enforces length
+limits (`name` ≤ 200, `description` ≤ 5000 Unicode scalar values — not
+bytes, since project content language is configurable per project and a
+200-character Italian name shouldn't be rejected sooner than an English
+one just because it has more accented letters), generates the id and
+timestamps, then calls the repository. `get`/`delete` map a missing
+row to `AppError::NotFound`.
+
+**Commands** (`commands/project.rs`): `create_project`, `list_projects`,
+`get_project`, `delete_project` — each just builds a `ProjectService`
+from the managed `DbService` and delegates. No SQL, no validation logic,
+no business rules in the command layer (same pattern as
+`commands::storage`).
+
+**Frontend service** (`features/projects/services/projects.ts`): typed
+`createProject`/`listProjects`/`getProject`/`deleteProject`, mapping the
+wire-format `RawProject` (`snake_case`, matching the Rust struct exactly)
+to a `Project` type (`camelCase`) — the same manual-mapping convention
+`services/storage.ts` already established, kept consistent rather than
+introducing `#[serde(rename_all = "camelCase")]` as a second convention.
+
+**Frontend feature** (`features/projects/`) — the first feature to
+actually need the `components/`/`services/` split §2 describes:
+- `ProjectsView.tsx` — feature root, composed by the thin
+  `pages/ProjectsPage.tsx`. Owns list/loading/error state, which dialog
+  is open, and selected-project state (see §11).
+- `components/ProjectList.tsx`, `ProjectDetail.tsx`,
+  `CreateProjectDialog.tsx`, `DeleteProjectDialog.tsx`.
+- Reuses `components/ui/EmptyState` (no projects / no project selected /
+  list failed to load) and the new `components/ui/Dialog` (generic modal
+  shell — Escape/backdrop-click to close, `role="dialog"`, used by both
+  the create and delete dialogs; not feature-specific, so it lives in the
+  app-level `components/ui/`, not inside `features/projects/`).
+- `ProjectDetail` renders three informational, non-interactive
+  placeholders ("Processes", "Captures", "Documentation", each "Not
+  available yet.") for what a project will eventually own — deliberately
+  no buttons that look functional but aren't.
+
+**Validation surfaces twice, deliberately:** the `<input required
+maxLength={200}>` in `CreateProjectDialog` gives instant feedback and
+blocks obviously-invalid submits client-side, but the backend
+(`ProjectService`) is the actual source of truth — it re-validates
+independently (trimming, length, emptiness) and is what every test in
+`services::project::tests` exercises. The frontend never trusts its own
+validation as sufficient.
+
+**Errors:** `AppError::Validation` (empty name, over-length) and
+`AppError::NotFound` (delete/get a missing project) — see §10. Displayed
+via `getErrorMessage()` (`utils/errorMessage.ts`), which extracts the
+safe `{ message }` from a rejected `invoke()` call; used by both dialogs
+and the list's error state.
+
+**Loading/error states:** `ProjectsView` shows "Loading projects…" while
+the initial `listProjects()` call is in flight, an error state with Retry
+if it fails, an empty state if it succeeds with zero projects, or the
+list+detail layout otherwise. `CreateProjectDialog`/`DeleteProjectDialog`
+disable their submit button and relabel it ("Creating…"/"Deleting…")
+while their own request is in flight, and refuse to resubmit — a second
+click while `submitting`/`deleting` is `true` is a no-op.
+
+**Testing:** 18 Rust tests across `repositories::project::tests` (pure
+persistence: create/list-ordering/get/delete/delete-missing/reopen) and
+`services::project::tests` (validation: empty/whitespace name rejected,
+trimming, length limits, id/timestamp generation, not-found on
+get/delete), all against isolated `tempfile::tempdir()` databases. No
+frontend test framework exists in this repo and TASK-005 does not
+introduce one (per the task's own instruction) — the full UI flow (empty
+state → create → validate → list → select → detail → delete confirm/
+cancel → delete → empty state) was instead verified interactively against
+the Vite dev server with a mocked Tauri IPC bridge (`window.__TAURI_INTERNALS__.invoke`
+substituted with an in-memory implementation matching the real commands'
+behavior), then the compiled native app was launched separately to
+confirm it starts cleanly against the real, schema-upgraded database. See
+PROJECT_STATE.md for the full verification record, including a
+noteworthy environment-specific finding around real-`AppData` persistence
+checks.
+
 ## Status
 
-Reflects the state after **TASK-004** (local SQLite persistence
-infrastructure — no domain schema, no Project/Capture/Process
-functionality). See [PROJECT_STATE.md](../PROJECT_STATE.md) for the
-authoritative current implementation status.
+Reflects the state after **TASK-005** (Project domain and persistence —
+no Process/Capture/Recording/AI functionality). See
+[PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
+implementation status.

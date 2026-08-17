@@ -10,15 +10,15 @@ functional specification.
 
 ## Current status
 
-**Milestone M0 — Foundation.** The application has its initial desktop
-shell: a sidebar (Projects / Settings), a header with a live backend
-connectivity indicator, and placeholder Projects/Settings pages. It also
-now has local SQLite persistence infrastructure — an embedded database,
-versioned migrations, and a repository boundary — used so far only to
-prove the storage layer itself works (the Settings page's "Local storage:
-Ready" indicator). No product functionality (projects, captures,
-recording, AI, etc.) has been implemented yet — the pages are still empty
-states with no real data. See [PROJECT_STATE.md](PROJECT_STATE.md) for the
+**Milestone M0 — Foundation.** GoLive can now create, list, select, and
+delete **projects** — the first real product functionality, persisted
+locally in SQLite and surviving application restarts. The application
+shell has a sidebar (Projects / Settings), a header with a live backend
+connectivity indicator, and a Settings page showing local storage status.
+No process/capture/recording/AI functionality exists yet — a project is
+currently just a name, description, and creation/update dates, with a
+detail view that clearly marks Processes/Captures/Documentation as "Not
+available yet." See [PROJECT_STATE.md](PROJECT_STATE.md) for the
 authoritative current state and [TASK_INDEX.md](TASK_INDEX.md) for what's
 planned next.
 

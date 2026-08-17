@@ -6,4 +6,5 @@
 | TASK-002 | Architecture hardening and development conventions | DONE |
 | TASK-003 | Application shell and navigation | DONE |
 | TASK-004 | Local SQLite data layer | DONE |
-| TASK-005 | Project domain and persistence | TODO |
+| TASK-005 | Project domain and persistence | DONE |
+| TASK-006 | Project editing and project workspace | TODO |

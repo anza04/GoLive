@@ -10,4 +10,18 @@ starts as a single file or a small flat folder. Only break it into
 actually has enough of each to need the separation — don't scaffold empty
 subfolders in advance.
 
-Not yet populated — introduced starting with the Projects feature (M1).
+## Current contents
+
+- `projects/` — the Project domain (list, create, select, delete,
+  detail view). The first feature to actually need the
+  `components/`/`services/` split described above:
+  - `ProjectsView.tsx` — feature root; owns list/selection/dialog state.
+  - `components/` — `ProjectList`, `ProjectDetail`, `CreateProjectDialog`,
+    `DeleteProjectDialog`.
+  - `services/projects.ts` — Tauri `invoke()` wrappers
+    (`createProject`/`listProjects`/`getProject`/`deleteProject`), per
+    the "feature-specific service calls live in
+    `features/<feature>/services/`" convention from TASK-002.
+  - No `hooks/`, `types/` (the `Project`/`CreateProjectInput` types live
+    directly in `services/projects.ts`, next to the IPC calls that define
+    them), or `tests/` subfolder yet — nothing needs them.

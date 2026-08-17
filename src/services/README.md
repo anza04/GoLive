@@ -19,3 +19,7 @@ that feature's code, not here.
   persistence proof-of-life command (TASK-004). No SQLite-specific
   terminology crosses this boundary — it returns a plain
   `{ ready, initializedAt }` shape.
+
+Project's Tauri calls are *not* here — they're feature-specific, so they
+live in `features/projects/services/projects.ts` instead (see
+`features/README.md`), per the convention above.

@@ -24,7 +24,10 @@ use rusqlite::Connection;
 
 /// `(version, sql)` pairs, in ascending order. `version` becomes the
 /// database's `user_version` once the migration has been applied.
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../../migrations/0001_initial.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../../migrations/0001_initial.sql")),
+    (2, include_str!("../../migrations/0002_projects.sql")),
+];
 
 pub fn run(conn: &mut Connection) -> Result<(), AppError> {
     let current_version: i64 = conn

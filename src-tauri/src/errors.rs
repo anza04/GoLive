@@ -25,6 +25,19 @@ pub enum AppError {
     /// Schema migrations failed to apply.
     #[error("GoLive's local database could not be prepared.")]
     Migration,
+
+    /// Input failed application-level validation (e.g. an empty required
+    /// field, a value over its length limit). Unlike the other variants,
+    /// the message here *is* meant to be shown to the user as-is — it's
+    /// always an author-written, safe string describing what to fix, never
+    /// a raw underlying error.
+    #[error("{0}")]
+    Validation(String),
+
+    /// The requested record does not exist (e.g. `get`/`delete` by an id
+    /// that isn't in the database).
+    #[error("The requested item could not be found.")]
+    NotFound,
 }
 
 impl AppError {
@@ -33,6 +46,8 @@ impl AppError {
             Self::Storage => "storage_unavailable",
             Self::Database => "database_error",
             Self::Migration => "migration_error",
+            Self::Validation(_) => "validation_error",
+            Self::NotFound => "not_found",
         }
     }
 }
