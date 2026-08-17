@@ -299,28 +299,29 @@ exists.
 ## 11. State management
 
 **CURRENT:** `App.tsx` still uses local component state (`useState`) for
-connectivity status. The Project feature (TASK-005) added its own local
-state, all in `features/projects/ProjectsView.tsx`: the project list,
-loading/error status, which dialog (if any) is open, and — the first real
-example of "feature state" — **which project is selected**. No state
+connectivity status. The Project feature owns its own state, all in
+`features/projects/ProjectsView.tsx`: the project list, loading/error
+status, which dialog (if any) is open, and — the ongoing example of
+"feature state" — **`activeProject`** (TASK-005 called this `selectedId`;
+TASK-006 renamed/promoted it to hold the full `Project`, since the
+workspace needs the whole record, not just an id to look up). No state
 management library is installed.
 
 **Rule:**
 - **Local UI state** (modal open/closed, form fields, a single component's
   status) → local component state (`useState`/`useReducer`). Default
-  choice. Example: `CreateProjectDialog`'s form fields and submitting
-  flag.
-- **Feature state** (e.g. selected project, future active-recording
-  state, process-editor state) → owned within that feature, introduced
-  only once the feature needs it. Example: `selectedId` in
-  `ProjectsView` — deliberately just a `useState<string | null>`, so if a
-  future feature (e.g. a floating widget) needs to know the current
-  project too, this is a same-shape swap into a `stores/` slice, not a
-  rewrite.
+  choice. Example: `CreateProjectDialog`/`EditProjectDialog`'s form fields
+  and submitting flag.
+- **Feature state** (e.g. active project, future active-recording state,
+  process-editor state) → owned within that feature, introduced only once
+  the feature needs it. Example: `activeProject` in `ProjectsView` —
+  deliberately just `useState<Project | null>`, so if a future feature
+  (e.g. a floating widget) needs to know the current project too, this is
+  a same-shape swap into a `stores/` slice, not a rewrite.
 - **Application state** (e.g. future global settings) → `src/stores/`,
   introduced only once at least two features genuinely need to share it.
-  Still empty — selected-project state doesn't qualify yet, since only
-  the Projects feature reads it.
+  Still empty — active-project state doesn't qualify yet, since only the
+  Projects feature reads it.
 
 No state management library is adopted by this task. If/when `stores/`
 state is actually needed, the simplest option that fits (React context, or
@@ -566,8 +567,8 @@ description, created_at, updated_at }`.
   accepted from the frontend. The frontend never generates database IDs.
 - `created_at`/`updated_at`: Unix epoch **milliseconds**, UTC, generated
   by the backend — never accepted from the frontend. `created_at` is set
-  once and never changes; `updated_at` would be bumped by a future
-  `update` operation (not implemented — see below).
+  once and never changes; `updated_at` is regenerated on every successful
+  `update` (TASK-006 — see §19).
 
 **Full flow (the concrete instantiation of the pattern §4–§6 describe):**
 
@@ -578,7 +579,7 @@ frontend project service     features/projects/services/projects.ts
     ↓
 Tauri invoke()
     ↓
-Tauri command                 commands::project (create/list/get/delete_project)
+Tauri command                 commands::project (create/list/get/update/delete_project)
     ↓
 ProjectService                 services::project — validation, id/timestamp
     ↓                                              generation, business rules
@@ -590,51 +591,53 @@ SQLite (projects table)
 ```
 
 **Repository** (`repositories/project.rs`): `ProjectRepository` trait —
-`create`, `list` (ordered `updated_at DESC`), `get`, `delete` (returns
-whether a row actually existed, so the service can distinguish "deleted"
-from "not found") — plus `SqliteProjectRepository`, the only
-implementation. **No `update` yet** — TASK-005's UI only needs
-create/list/get/delete; the trait/impl shape doesn't need to change to
-add one later, it's just one more method.
+`create`, `list` (ordered `updated_at DESC`), `get`, `update` (TASK-006),
+`delete` — `update`/`delete` both return whether a row actually existed,
+so the service can distinguish "changed" from "not found" — plus
+`SqliteProjectRepository`, the only implementation.
 
-**Service** (`services/project.rs`): `ProjectService::create` trims
-`name`/`description`, rejects an empty (post-trim) name, enforces length
-limits (`name` ≤ 200, `description` ≤ 5000 Unicode scalar values — not
-bytes, since project content language is configurable per project and a
-200-character Italian name shouldn't be rejected sooner than an English
-one just because it has more accented letters), generates the id and
-timestamps, then calls the repository. `get`/`delete` map a missing
-row to `AppError::NotFound`.
+**Service** (`services/project.rs`): `ProjectService::create`/`update`
+both trim `name`/`description`, reject an empty (post-trim) name, and
+enforce length limits (`name` ≤ 200, `description` ≤ 5000 Unicode scalar
+values — not bytes, since project content language is configurable per
+project and a 200-character Italian name shouldn't be rejected sooner
+than an English one just because it has more accented letters).
+`update` additionally verifies the project exists (via `get`, which maps
+a missing row to `AppError::NotFound`) before writing, and regenerates
+`updated_at` while carrying `id`/`created_at` forward from the existing
+record — the caller's input has no way to influence either.
 
 **Commands** (`commands/project.rs`): `create_project`, `list_projects`,
-`get_project`, `delete_project` — each just builds a `ProjectService`
-from the managed `DbService` and delegates. No SQL, no validation logic,
-no business rules in the command layer (same pattern as
-`commands::storage`).
+`get_project`, `update_project`, `delete_project` — each just builds a
+`ProjectService` from the managed `DbService` and delegates. No SQL, no
+validation logic, no business rules in the command layer (same pattern as
+`commands::storage`). `update_project` takes an explicit
+`UpdateProjectInput { id, name, description }` — not the `Project` model
+itself — so a request has no field for `created_at`/`updated_at` to
+occupy, accidentally or otherwise.
 
 **Frontend service** (`features/projects/services/projects.ts`): typed
-`createProject`/`listProjects`/`getProject`/`deleteProject`, mapping the
-wire-format `RawProject` (`snake_case`, matching the Rust struct exactly)
-to a `Project` type (`camelCase`) — the same manual-mapping convention
-`services/storage.ts` already established, kept consistent rather than
-introducing `#[serde(rename_all = "camelCase")]` as a second convention.
+`createProject`/`listProjects`/`getProject`/`updateProject`/
+`deleteProject`, mapping the wire-format `RawProject` (`snake_case`,
+matching the Rust struct exactly) to a `Project` type (`camelCase`) — the
+same manual-mapping convention `services/storage.ts` already established,
+kept consistent rather than introducing
+`#[serde(rename_all = "camelCase")]` as a second convention.
 
 **Frontend feature** (`features/projects/`) — the first feature to
-actually need the `components/`/`services/` split §2 describes:
+actually need the `components/`/`services/` split §2 describes. See §19
+for the Workspace/Overview/editing pieces added in TASK-006.
 - `ProjectsView.tsx` — feature root, composed by the thin
   `pages/ProjectsPage.tsx`. Owns list/loading/error state, which dialog
-  is open, and selected-project state (see §11).
-- `components/ProjectList.tsx`, `ProjectDetail.tsx`,
-  `CreateProjectDialog.tsx`, `DeleteProjectDialog.tsx`.
-- Reuses `components/ui/EmptyState` (no projects / no project selected /
-  list failed to load) and the new `components/ui/Dialog` (generic modal
-  shell — Escape/backdrop-click to close, `role="dialog"`, used by both
-  the create and delete dialogs; not feature-specific, so it lives in the
-  app-level `components/ui/`, not inside `features/projects/`).
-- `ProjectDetail` renders three informational, non-interactive
-  placeholders ("Processes", "Captures", "Documentation", each "Not
-  available yet.") for what a project will eventually own — deliberately
-  no buttons that look functional but aren't.
+  is open, and `activeProject` (see §11).
+- `components/ProjectList.tsx`, `CreateProjectDialog.tsx`,
+  `DeleteProjectDialog.tsx`, plus `ProjectWorkspace.tsx`,
+  `ProjectOverview.tsx`, `EditProjectDialog.tsx` (§19).
+- Reuses `components/ui/EmptyState` (no projects / list failed to load)
+  and the shared `components/ui/Dialog` (generic modal shell —
+  Escape/backdrop-click to close, `role="dialog"`, used by all three
+  project dialogs; not feature-specific, so it lives in the app-level
+  `components/ui/`, not inside `features/projects/`).
 
 **Validation surfaces twice, deliberately:** the `<input required
 maxLength={200}>` in `CreateProjectDialog` gives instant feedback and
@@ -645,39 +648,149 @@ independently (trimming, length, emptiness) and is what every test in
 validation as sufficient.
 
 **Errors:** `AppError::Validation` (empty name, over-length) and
-`AppError::NotFound` (delete/get a missing project) — see §10. Displayed
-via `getErrorMessage()` (`utils/errorMessage.ts`), which extracts the
-safe `{ message }` from a rejected `invoke()` call; used by both dialogs
-and the list's error state.
+`AppError::NotFound` (get/update/delete a missing project) — see §10.
+Displayed via `getErrorMessage()` (`utils/errorMessage.ts`), which
+extracts the safe `{ message }` from a rejected `invoke()` call; used by
+all three dialogs and the list's error state. `isNotFoundError()` (same
+file) lets a caller react specifically to a `not_found` code — used by
+`EditProjectDialog` to exit the workspace gracefully instead of showing a
+generic error if the project was deleted elsewhere mid-edit (§19), and by
+`DeleteProjectDialog` to treat "already gone" the same as "successfully
+deleted."
 
 **Loading/error states:** `ProjectsView` shows "Loading projects…" while
 the initial `listProjects()` call is in flight, an error state with Retry
 if it fails, an empty state if it succeeds with zero projects, or the
-list+detail layout otherwise. `CreateProjectDialog`/`DeleteProjectDialog`
-disable their submit button and relabel it ("Creating…"/"Deleting…")
-while their own request is in flight, and refuse to resubmit — a second
-click while `submitting`/`deleting` is `true` is a no-op.
+project list otherwise (selecting a project switches to the Workspace,
+§19). `CreateProjectDialog`/`EditProjectDialog`/`DeleteProjectDialog` each
+disable their submit button and relabel it while their own request is in
+flight ("Creating…"/"Saving…"/"Deleting…"), and refuse to resubmit — a
+second click while the request is in flight is a no-op.
 
-**Testing:** 18 Rust tests across `repositories::project::tests` (pure
-persistence: create/list-ordering/get/delete/delete-missing/reopen) and
-`services::project::tests` (validation: empty/whitespace name rejected,
-trimming, length limits, id/timestamp generation, not-found on
-get/delete), all against isolated `tempfile::tempdir()` databases. No
-frontend test framework exists in this repo and TASK-005 does not
-introduce one (per the task's own instruction) — the full UI flow (empty
-state → create → validate → list → select → detail → delete confirm/
-cancel → delete → empty state) was instead verified interactively against
-the Vite dev server with a mocked Tauri IPC bridge (`window.__TAURI_INTERNALS__.invoke`
-substituted with an in-memory implementation matching the real commands'
-behavior), then the compiled native app was launched separately to
-confirm it starts cleanly against the real, schema-upgraded database. See
+**Testing:** see §19 for the current test count and TASK-006's UI-flow
+verification (which folds in and re-verifies everything described here).
+No frontend test framework exists in this repo and none has been
+introduced for the Project domain (per each task's own instruction) — UI
+flows are verified interactively against the Vite dev server with a
+mocked Tauri IPC bridge, then the compiled native app is launched
+separately to confirm it starts cleanly against the real database. See
 PROJECT_STATE.md for the full verification record, including a
-noteworthy environment-specific finding around real-`AppData` persistence
-checks.
+noteworthy environment-specific finding (TASK-005) around real-`AppData`
+persistence checks.
+
+## 19. Project Workspace and editing (TASK-006)
+
+**CURRENT.** Turns a selected Project into a real workspace, and adds
+update (edit) end to end.
+
+```
+Projects (list)
+    ↓ select a project
+activeProject                  ProjectsView's useState<Project | null>
+    ↓
+Project Workspace              components/ProjectWorkspace.tsx
+    ├── Overview                 IMPLEMENTED — components/ProjectOverview.tsx
+    ├── Processes                NOT AVAILABLE YET (disabled tab)
+    ├── Captures                 NOT AVAILABLE YET (disabled tab)
+    └── Documentation            NOT AVAILABLE YET (disabled tab)
+```
+
+**Projects vs. Workspace — two distinct concepts, not two routes:**
+`ProjectsView` renders one or the other based on `activeProject`, still
+without a routing library (see the original reasoning in §16 — nothing
+here changes that calculus: still no deep-linking/back-button requirement,
+still one component deciding what to render). Selecting a project in the
+list sets `activeProject`; the Workspace's "← Projects" button clears it.
+No project data is destroyed by this transition — `activeProject` is just
+a reference to an entry already held in `ProjectsView`'s `projects` array.
+
+**Update flow (mirrors create/list/get/delete exactly, §18):**
+
+```
+Projects UI
+    ↓
+frontend project service    features/projects/services/projects.ts (updateProject)
+    ↓
+Tauri invoke("update_project")
+    ↓
+commands::update_project     thin — builds ProjectService, delegates
+    ↓
+ProjectService::update        validate/trim, verify existence, regenerate
+    ↓                          updated_at, carry id/created_at forward
+ProjectRepository::update      UPDATE ... SET name, description, updated_at
+    ↓                          WHERE id = ? — id/created_at not in SET clause
+SQLite (projects table)
+```
+
+**Workspace shell** (`ProjectWorkspace.tsx`): back button, project
+name/description header (shown regardless of which tab is active — see
+below), Edit/Delete actions, and the tab bar. Tabs are a small
+`{id, label}[]` array, structurally identical to the top-level
+`NAV_ITEMS`/`PAGES` pattern in `App.tsx` (§16) — the same seam a future
+router would replace, just one level deeper (`/projects/:id/overview`
+etc.). Only `AVAILABLE_TAB = "overview"` is enabled; the other three are
+real `disabled` buttons with a "Not available yet" tooltip — genuinely
+non-interactive, not fake-clickable.
+
+**Header title decision:** the app-level `Header` (§16) still shows
+"Projects" while inside the workspace — it was **not** changed to the
+project name. The task explicitly allowed this ("if useful"); doing so
+would have required lifting `activeProject` up into `App.tsx`, breaking
+the feature's self-contained state (§11) for a cosmetic win the
+workspace's own prominent name heading already delivers. See DECISIONS.md.
+
+**Overview** (`ProjectOverview.tsx`): created/updated dates plus three
+informational "reserved" cards (Processes/Captures/Documentation, each
+with a one-line explanation of what will eventually live there) — the
+same non-interactive placeholder pattern as the disabled tabs, reusing
+generic `.reserved-section` CSS rather than the tab-specific classes.
+Name/description are not repeated here — they're already shown once, in
+the workspace header, visible regardless of tab.
+
+**Edit** (`EditProjectDialog.tsx`): a third dialog reusing `components/ui/Dialog`,
+essentially `CreateProjectDialog`'s shape pre-filled with the current
+values. Cancel is free — the dialog's `name`/`description` state is local
+and simply discarded on unmount, no backend call, no store mutation. Save
+calls `updateProject`, then the parent's `onUpdated(project)` — which
+both updates `activeProject` (workspace shows the new values immediately)
+and moves the project to the front of `ProjectsView`'s local `projects`
+array (matching the backend's `updated_at DESC` order without a
+re-`listProjects()` round trip). On error, the dialog stays open with the
+user's typed values intact and shows the error inline — nothing is
+silently reverted. On `AppError::NotFound` specifically (the project was
+deleted elsewhere), `onNotFound` fires instead: the workspace closes and
+the stale entry is dropped from the list, rather than showing a confusing
+generic error for a record that's already gone.
+
+**Delete, revisited:** now triggered only from inside the Workspace (not
+duplicated in the list — see DECISIONS.md for why). Same confirm-dialog
+UX as TASK-005 (`DeleteProjectDialog`, unchanged), but its `onDeleted`
+now also clears `activeProject`, returning the user to the Projects list.
+`AppError::NotFound` here is treated as an effective success (the record
+being gone either way, this is the exact state a working delete leaves
+you in) rather than an error.
+
+**Testing:** 44 Rust tests (35 in `repositories`/`services` for the
+Project domain plus infra tests — up from 24 before this task; new:
+`update_changes_name_and_description`,
+`update_does_not_change_id_or_created_at`,
+`update_missing_project_returns_false`,
+`updating_a_project_moves_it_to_the_top_of_the_list`, and 6
+`services::project` update tests covering trimming, validation,
+`updated_at` regeneration/`created_at` preservation, and not-found), all
+against isolated `tempfile::tempdir()` databases. The full UI flow (empty
+→ create → enter workspace → Overview displays → edit → cancel discards →
+edit → save persists and reorders the list → return to Projects → delete
+from workspace with confirmation → returns to Projects → empty state)
+was verified against the Vite dev server with the same mocked-IPC
+approach as TASK-005, extended to also mock `update_project`. See
+PROJECT_STATE.md for the full record, including a light real-`AppData`
+spot-check of the update path specifically (no repeat of TASK-005's
+extensive investigation, per this task's own instruction).
 
 ## Status
 
-Reflects the state after **TASK-005** (Project domain and persistence —
-no Process/Capture/Recording/AI functionality). See
+Reflects the state after **TASK-006** (Project Workspace and editing —
+still no Process/Capture/Recording/AI functionality). See
 [PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
 implementation status.

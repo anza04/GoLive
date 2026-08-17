@@ -2,23 +2,24 @@ import { useEffect, useState } from "react";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { getErrorMessage } from "../../utils/errorMessage";
 import { ProjectList } from "./components/ProjectList";
-import { ProjectDetail } from "./components/ProjectDetail";
+import { ProjectWorkspace } from "./components/ProjectWorkspace";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
 import { DeleteProjectDialog } from "./components/DeleteProjectDialog";
 import { listProjects, type Project } from "./services/projects";
 
-// Selected-project state lives here, at the feature root, since only this
-// feature currently needs it — see docs/architecture.md ("State
-// management"). If a future feature (e.g. a floating widget) needs to
-// know the current project too, this `useState<string | null>` moves
-// into a `stores/currentProject.ts` slice with the same shape; nothing
-// else here would need to change.
+// `activeProject` holds the currently open project (Projects list vs.
+// Project Workspace) as plain feature-local state — see
+// docs/architecture.md ("State management"). It's session-only, not
+// persisted, and lives here for the same reason `selectedId` did before
+// it: only this feature currently reads/writes it. If a future feature
+// needs the current project too, this becomes a same-shape
+// `stores/currentProject.ts` slice — a swap, not a rewrite.
 type ListState = { state: "loading" } | { state: "ready" } | { state: "error"; message: string };
 
 export function ProjectsView() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [listState, setListState] = useState<ListState>({ state: "loading" });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
 
@@ -39,13 +40,21 @@ export function ProjectsView() {
 
   function handleCreated(project: Project) {
     setProjects((prev) => [project, ...prev]);
-    setSelectedId(project.id);
+    setActiveProject(project);
     setCreateOpen(false);
   }
 
-  function handleDeleted(id: string) {
+  function handleUpdated(updated: Project) {
+    // The project just became the most-recently-updated one, so it moves
+    // to the top of the local list too — matching the backend's
+    // `updated_at DESC` ordering without a full re-fetch.
+    setProjects((prev) => [updated, ...prev.filter((project) => project.id !== updated.id)]);
+    setActiveProject(updated);
+  }
+
+  function handleGone(id: string) {
     setProjects((prev) => prev.filter((project) => project.id !== id));
-    setSelectedId((current) => (current === id ? null : current));
+    setActiveProject(null);
     setDeleteTarget(null);
   }
 
@@ -64,6 +73,27 @@ export function ProjectsView() {
           </button>
         }
       />
+    );
+  }
+
+  if (activeProject) {
+    return (
+      <>
+        <ProjectWorkspace
+          project={activeProject}
+          onBack={() => setActiveProject(null)}
+          onUpdated={handleUpdated}
+          onDeleteRequested={() => setDeleteTarget(activeProject)}
+          onGone={() => handleGone(activeProject.id)}
+        />
+        {deleteTarget && (
+          <DeleteProjectDialog
+            project={deleteTarget}
+            onClose={() => setDeleteTarget(null)}
+            onDeleted={handleGone}
+          />
+        )}
+      </>
     );
   }
 
@@ -90,46 +120,29 @@ export function ProjectsView() {
     );
   }
 
-  const selectedProject = projects.find((project) => project.id === selectedId) ?? null;
-
   return (
-    <div className="projects-layout">
-      <div className="projects-list-pane">
-        <div className="projects-toolbar">
-          <button
-            type="button"
-            className="button button--primary"
-            onClick={() => setCreateOpen(true)}
-          >
-            + New project
-          </button>
-        </div>
-        <ProjectList projects={projects} selectedId={selectedId} onSelect={setSelectedId} />
+    <div className="projects-page">
+      <div className="projects-toolbar">
+        <button
+          type="button"
+          className="button button--primary"
+          onClick={() => setCreateOpen(true)}
+        >
+          + New project
+        </button>
       </div>
 
-      <div className="projects-detail-pane">
-        {selectedProject ? (
-          <ProjectDetail
-            project={selectedProject}
-            onDelete={() => setDeleteTarget(selectedProject)}
-          />
-        ) : (
-          <EmptyState
-            title="No project selected"
-            description="Select a project from the list to see its details."
-          />
-        )}
-      </div>
+      <ProjectList
+        projects={projects}
+        selectedId={null}
+        onSelect={(id) => {
+          const project = projects.find((candidate) => candidate.id === id);
+          if (project) setActiveProject(project);
+        }}
+      />
 
       {createOpen && (
         <CreateProjectDialog onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
-      )}
-      {deleteTarget && (
-        <DeleteProjectDialog
-          project={deleteTarget}
-          onClose={() => setDeleteTarget(null)}
-          onDeleted={handleDeleted}
-        />
       )}
     </div>
   );

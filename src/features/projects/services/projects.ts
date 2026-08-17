@@ -15,6 +15,12 @@ export interface CreateProjectInput {
   description?: string;
 }
 
+export interface UpdateProjectInput {
+  id: string;
+  name: string;
+  description?: string;
+}
+
 // The IPC wire shape: matches the Rust `Project` struct's field names
 // exactly (snake_case), mapped to the camelCase `Project` above for use
 // in React. Kept private to this file — everything else in the app only
@@ -49,6 +55,11 @@ export async function listProjects(): Promise<Project[]> {
 
 export async function getProject(id: string): Promise<Project> {
   const raw = await invoke<RawProject>("get_project", { id });
+  return fromRaw(raw);
+}
+
+export async function updateProject(input: UpdateProjectInput): Promise<Project> {
+  const raw = await invoke<RawProject>("update_project", { input });
   return fromRaw(raw);
 }
 

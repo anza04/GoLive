@@ -7,7 +7,7 @@ Current milestone:
 M0 — Foundation
 
 Completed:
-TASK-001, TASK-002, TASK-003, TASK-004, TASK-005
+TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006
 
 ## Current implementation
 
@@ -20,47 +20,60 @@ TASK-001, TASK-002, TASK-003, TASK-004, TASK-005
   a clear active state, header showing the active area's title and a
   non-technical connectivity indicator ("Ready" / "Connecting…" /
   "Offline"), scrollable main content area
-- **Project domain (TASK-005)** — GoLive's first real product
-  functionality:
+- **Project domain (TASK-005) + Project Workspace and editing
+  (TASK-006)** — GoLive's first real product functionality:
   - Domain model `Project { id, name, description, created_at, updated_at }`
     (`src-tauri/src/models/project.rs`); id is a backend-generated UUID
     v4, timestamps are backend-generated Unix epoch milliseconds — never
-    accepted from the frontend
+    accepted from the frontend, including through update
   - `projects` SQLite table (`src-tauri/migrations/0002_projects.sql`,
     additive — the TASK-004 migration was not modified), indexed on
-    `updated_at DESC` (the default list order)
+    `updated_at DESC` (the default list order); no further migration was
+    needed for update (existing columns already sufficient)
   - `ProjectRepository` trait + `SqliteProjectRepository`
-    (`src-tauri/src/repositories/project.rs`): create/list/get/delete —
-    no `update` yet (not needed by TASK-005's UI)
-  - `ProjectService` (`src-tauri/src/services/project.rs`): validates and
-    trims `name` (required, ≤200 chars) and `description` (optional,
-    ≤5000 chars), generates id/timestamps, is the first real occupant of
-    the "business logic" boundary TASK-002 documented
+    (`src-tauri/src/repositories/project.rs`): create/list/get/**update**/
+    delete — `update` writes `name`/`description`/`updated_at` only,
+    keyed by `id`; `id`/`created_at` are structurally outside the SQL
+    `SET` clause, not just a convention
+  - `ProjectService` (`src-tauri/src/services/project.rs`): `create` and
+    **`update`** both validate/trim `name` (required, ≤200 chars) and
+    `description` (optional, ≤5000 chars); `update` additionally verifies
+    the project exists and regenerates `updated_at` while carrying
+    `id`/`created_at` forward from the existing record
   - Tauri commands `create_project` / `list_projects` / `get_project` /
-    `delete_project` (`src-tauri/src/commands/project.rs`) — thin,
-    delegate entirely to `ProjectService`
+    **`update_project`** / `delete_project`
+    (`src-tauri/src/commands/project.rs`) — thin, delegate entirely to
+    `ProjectService`. `update_project` takes an explicit
+    `UpdateProjectInput { id, name, description }`, not the `Project`
+    model itself, so a request has no field for `created_at`/`updated_at`
+    to occupy
   - `AppError` gained `Validation(String)` (safe, shown to the user
-    as-is) and `NotFound` variants
+    as-is) and `NotFound` variants (TASK-005; unchanged this task)
   - Frontend service `src/features/projects/services/projects.ts` —
-    typed `createProject`/`listProjects`/`getProject`/`deleteProject`,
-    maps the wire `snake_case` shape to a `camelCase` `Project` type
-  - Real Projects UI (`src/features/projects/`): project list (sorted
-    newest-updated-first) with a persistent "+ New project" entry point,
-    a create dialog (name required, description optional, inline
-    validation/error display, disabled-while-submitting), project
-    selection with a visible active state, a detail view (name,
-    description, created/updated dates, and three clearly-labeled
-    informational "Not available yet." placeholders for
-    Processes/Captures/Documentation — no fake buttons), and delete with
-    an explicit confirm/cancel dialog
-  - Loading ("Loading projects…"), error (with Retry), and empty
-    ("No projects yet" / "Create a project to start documenting your
-    processes.") states throughout
-  - New shared UI: `components/ui/Dialog` (modal shell, Escape/backdrop
-    dismissal, reused by both the create and delete dialogs);
-    `utils/formatDate.ts` (epoch ms → locale-formatted display, backend
-    never formats dates) and `utils/errorMessage.ts` (extracts the safe
-    `AppError` message from a rejected `invoke()` call)
+    typed `createProject`/`listProjects`/`getProject`/**`updateProject`**/
+    `deleteProject`, maps the wire `snake_case` shape to a `camelCase`
+    `Project` type
+  - **Project Workspace** (`src/features/projects/components/ProjectWorkspace.tsx`):
+    selecting a project in the list opens its workspace (back button,
+    name/description header, Edit/Delete actions, a tab bar with
+    "Overview" implemented and "Processes"/"Captures"/"Documentation"
+    genuinely `disabled` — not fake-clickable). `ProjectOverview.tsx`
+    shows created/updated dates plus three informational "Not available
+    yet." cards. `EditProjectDialog.tsx` (pre-filled name/description,
+    Cancel discards with no backend call, Save persists and immediately
+    updates the workspace + moves the project to the top of the list).
+    Delete moved from the old list-adjacent detail pane into the
+    workspace (confirm dialog unchanged), clearing the active project and
+    returning to Projects on success
+  - `activeProject` (`ProjectsView.tsx`, `useState<Project | null>`)
+    replaces TASK-005's `selectedId` — holds the full record the
+    workspace needs, still feature-local, still not a global store
+  - Projects list is now list-only (no more inline two-pane detail);
+    still has its own loading/error/empty states, "+ New project" entry
+    point, and creation dialog, unchanged from TASK-005
+  - Shared UI: `components/ui/Dialog` (modal shell, reused by all three
+    project dialogs); `utils/formatDate.ts`; `utils/errorMessage.ts`
+    (TASK-006 added `isNotFoundError()` for graceful NotFound handling)
   - `Settings` unaffected: `Local storage: Ready` continues to work
     unchanged
 - Settings placeholder page — empty state, no other settings implemented
@@ -282,10 +295,50 @@ checked manually by a developer on a normal desktop session (launch
 GoLive, create a project, fully close the app, reopen it, confirm the
 project is still listed) before relying on it in a real engagement.
 
+**TASK-006 validation:** `npx tsc --noEmit`, `npm run build`, `cargo
+check` (no warnings), `cargo test` (44/44 passing — 6 infra + 38 Project
+domain tests, up from 24: 4 new repository tests
+`update_changes_name_and_description`,
+`update_does_not_change_id_or_created_at`,
+`update_missing_project_returns_false`,
+`updating_a_project_moves_it_to_the_top_of_the_list`, and 6 new service
+tests for update trimming/validation/`updated_at` regeneration/
+`created_at` preservation/not-found), and `npm run tauri build` all pass.
+
+Full UI-flow verification (empty → create → enters workspace directly →
+Overview shows dates + reserved Processes/Captures/Documentation cards →
+Edit opens with current values pre-filled → Cancel discards (verified:
+typed change to the name field, clicked Cancel, confirmed both the UI and
+the mock backend record were unchanged) → Edit again → Save persists
+(name changed, `created_at` preserved, `updated_at` changed) and the
+workspace shows the new name immediately → "← Projects" returns to the
+list showing the updated name → created a second project and edited the
+first again to confirm it moves back to the top of the list on update →
+Delete from the workspace requires confirmation → deleting returns to
+Projects with the item removed → deleting the last project returns the
+empty state) was verified against the Vite dev server with the same
+mocked-`window.__TAURI_INTERNALS__.invoke` approach as TASK-005, extended
+to also handle `update_project`. The disabled workspace tabs
+(Processes/Captures/Documentation) were confirmed via
+`element.disabled === true` — genuinely non-interactive, not just visually
+muted. The native `golive.exe` was built and launched separately and
+confirmed running via `tasklist` (killed after verification) against the
+real database.
+
+**Real-`AppData` update persistence:** unlike TASK-005's investigation
+(which is not repeated here, per this task's explicit instruction), this
+task's real-`AppData` spot-check was light and did **not** reproduce the
+earlier anomaly — a project was created, then updated, then read back, as
+three separate process invocations against `%APPDATA%\com.golive.app\`
+(via a temporary `cargo run --example`, deleted before commit), and each
+step returned exactly what the previous step had written
+(`created_at` preserved, `updated_at` changed, name updated). This is
+reported as an observation, not treated as confirmation the TASK-005
+anomaly can't recur — per this task's instruction, no infrastructure
+changes were made in response to either result.
+
 ## Not implemented yet
 
-- Project editing/update (repository/service intentionally has no
-  `update` method yet — see DECISIONS.md)
 - Processes, Captures
 - Screenshots (full-screen / monitor / area)
 - Screen recording, microphone recording
@@ -309,4 +362,4 @@ project is still listed) before relying on it in a real engagement.
 
 ## Next task
 
-TASK-006
+TASK-007

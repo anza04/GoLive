@@ -2,11 +2,6 @@
 //! (docs/architecture.md, "Persistence boundary"). All SQL for projects
 //! lives here — nothing above this layer (service, commands, frontend)
 //! knows or needs to know it's SQLite.
-//!
-//! No `update` yet: TASK-005's UI only needs create/list/get/delete.
-//! Adding `update` later is a matter of adding one more trait method plus
-//! a `SqliteProjectRepository` impl — the shape here doesn't need to
-//! change to accommodate it.
 
 use crate::db::DbPool;
 use crate::errors::AppError;
@@ -18,6 +13,13 @@ pub trait ProjectRepository: Send + Sync {
     /// Ordered `updated_at DESC` — most recently touched project first.
     fn list(&self) -> Result<Vec<Project>, AppError>;
     fn get(&self, id: &str) -> Result<Option<Project>, AppError>;
+    /// Writes `name`, `description`, and `updated_at` from `project` to
+    /// the row matching `project.id`. `id` and `created_at` are not part
+    /// of the `SET` clause — structurally impossible to change through
+    /// this method, not just a convention callers are trusted to follow.
+    /// Returns whether a row was actually updated (`false` if `id` didn't
+    /// exist), so the caller can distinguish "updated" from "not found".
+    fn update(&self, project: &Project) -> Result<bool, AppError>;
     /// Returns whether a row was actually deleted (`false` if `id` didn't
     /// exist), so the caller can distinguish "deleted" from "not found".
     fn delete(&self, id: &str) -> Result<bool, AppError>;
@@ -85,6 +87,20 @@ impl ProjectRepository for SqliteProjectRepository {
         }
     }
 
+    fn update(&self, project: &Project) -> Result<bool, AppError> {
+        let conn = self.pool.get()?;
+        let affected = conn.execute(
+            "UPDATE projects SET name = ?1, description = ?2, updated_at = ?3 WHERE id = ?4",
+            params![
+                project.name,
+                project.description,
+                project.updated_at,
+                project.id,
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
     fn delete(&self, id: &str) -> Result<bool, AppError> {
         let conn = self.pool.get()?;
         let affected = conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
@@ -142,6 +158,71 @@ mod tests {
         let listed = repo.list().expect("list");
         let ids: Vec<&str> = listed.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["newer", "older"]);
+    }
+
+    #[test]
+    fn update_changes_name_and_description() {
+        let (_dir, repo) = repo_in_temp_dir();
+        let mut project = sample("p1", "Original name", 1000);
+        project.description = "original description".to_string();
+        repo.create(&project).unwrap();
+
+        let mut changed = project.clone();
+        changed.name = "New name".to_string();
+        changed.description = "new description".to_string();
+        changed.updated_at = 2000;
+
+        let updated = repo.update(&changed).expect("update");
+        assert!(updated);
+
+        let fetched = repo.get("p1").expect("get").expect("project should exist");
+        assert_eq!(fetched.name, "New name");
+        assert_eq!(fetched.description, "new description");
+        assert_eq!(fetched.updated_at, 2000);
+    }
+
+    #[test]
+    fn update_does_not_change_id_or_created_at() {
+        let (_dir, repo) = repo_in_temp_dir();
+        let project = sample("p1", "Original name", 1000);
+        repo.create(&project).unwrap();
+
+        // Even if a caller (incorrectly) put different id/created_at values
+        // on the struct passed to `update`, the SQL only ever targets the
+        // row matching `project.id` and never writes `created_at` — the id
+        // used to look up the row is what determines identity here.
+        let mut changed = project.clone();
+        changed.name = "New name".to_string();
+        changed.updated_at = 2000;
+        repo.update(&changed).expect("update");
+
+        let fetched = repo.get("p1").expect("get").expect("project should exist");
+        assert_eq!(fetched.id, "p1");
+        assert_eq!(fetched.created_at, 1000, "created_at must not change on update");
+    }
+
+    #[test]
+    fn update_missing_project_returns_false() {
+        let (_dir, repo) = repo_in_temp_dir();
+        let ghost = sample("does-not-exist", "Ghost", 1000);
+        let updated = repo.update(&ghost).expect("update");
+        assert!(!updated);
+    }
+
+    #[test]
+    fn updating_a_project_moves_it_to_the_top_of_the_list() {
+        let (_dir, repo) = repo_in_temp_dir();
+        repo.create(&sample("older", "Older project", 1000)).unwrap();
+        repo.create(&sample("newer", "Newer project", 2000)).unwrap();
+
+        // Touch the older project with a newer `updated_at`.
+        let mut touched = sample("older", "Older project", 3000);
+        touched.description = "desc".to_string();
+        repo.update(&touched).expect("update");
+
+        let listed = repo.list().expect("list");
+        let ids: Vec<&str> = listed.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["older", "newer"], "the just-updated project should now be first");
     }
 
     #[test]

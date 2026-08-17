@@ -400,3 +400,113 @@ additional code.
 **Consequence:** confirms the hand-rolled approach scales to multiple
 migrations without friction; still revisit only if future needs (down-
 migrations, checksums) genuinely outgrow it.
+
+## TASK-006 — Project workspace and editing
+
+**Decision:** Projects and the Project Workspace are two states of one
+feature component (`ProjectsView` renders either the list or
+`ProjectWorkspace` based on `activeProject`), not two top-level
+`AppView`s or routes.
+**Reason:** the top-level `Sidebar`/`AppView` navigation (TASK-003) is
+for GoLive's main areas (Projects, Settings); "which project am I
+looking at" is a concern entirely internal to the Projects feature, and
+a routing library still isn't justified by one more internal state
+switch — the exact reasoning TASK-003 already established for the
+top-level nav applies unchanged here, one level deeper.
+**Consequence:** entering/leaving the workspace is instant local state
+(`setActiveProject`), no URL changes, no router dependency added; the
+`WORKSPACE_TABS` array inside `ProjectWorkspace` is deliberately shaped
+like the top-level `NAV_ITEMS`/`PAGES` pair so a future router swap (at
+either level) is the same mechanical change.
+
+**Decision:** `activeProject` is `useState<Project | null>` inside
+`ProjectsView`, holding the full record (not just an id, as TASK-005's
+`selectedId` did).
+**Reason:** the workspace needs the whole `Project` to render immediately
+(name, description, dates) without an extra `getProject` round trip on
+every selection; TASK-005's `id`-only state was sufficient for a detail
+pane fed by a `.find()` over an already-loaded list, but the workspace
+model benefits from holding the object directly, especially since
+`onUpdated` needs to replace it in place.
+**Consequence:** still feature-local, still not a store — same
+documented promotion path as before (§11) if a future feature needs the
+current project.
+
+**Decision:** the app-level `Header` continues to show "Projects" while
+inside the workspace; it was not changed to show the project name.
+**Reason:** the task explicitly allowed this ("if useful"). Making the
+swap would require lifting `activeProject` out of `ProjectsView` into
+`App.tsx` (the only component with access to `Header`), which breaks the
+feature's self-containment for a purely cosmetic gain — the workspace's
+own prominent name/description heading already identifies "what am I
+looking at" without it.
+**Consequence:** `Header`'s title continues to reflect only the top-level
+area (Projects/Settings), unchanged since TASK-003; no new prop or
+lifted state was introduced.
+
+**Decision:** delete is available only from inside the Project Workspace
+— not duplicated as a per-row action in the Projects list.
+**Reason:** the task explicitly allowed either placement ("It is also
+acceptable to keep deletion only in the Projects list if that fits the
+current UI better" / workspace placement was the other named option);
+with the list now a plain list (no more adjacent detail pane to hang a
+Delete button off), and the "don't duplicate destructive actions
+unnecessarily" instruction, putting it once, in the workspace (where the
+user is already looking at the specific project), is simpler than adding
+a second control.
+**Consequence:** deleting a project always requires first opening its
+workspace; `DeleteProjectDialog`'s confirm UX is otherwise unchanged from
+TASK-005.
+
+**Decision:** a dedicated `EditProjectDialog` (modal), not inline editing
+within the workspace.
+**Reason:** the task allowed either; a dialog reuses the existing
+`components/ui/Dialog` shell and is structurally identical to
+`CreateProjectDialog` (same two fields, same validation/error/loading
+pattern), so it cost far less to build and keep consistent than an
+inline edit-mode toggle for the workspace header would have.
+**Consequence:** editing always opens a modal rather than editing the
+header text in place; Cancel is "free" (local form state discarded on
+unmount, no backend call), matching the spec's Cancel semantics exactly
+with no extra code.
+
+**Decision:** `AppError::NotFound` from `update_project`/`delete_project`
+is handled specially by the frontend (`isNotFoundError()`,
+`utils/errorMessage.ts`) rather than shown as a generic error.
+**Reason:** required by the task brief ("If project no longer exists:
+handle NotFound correctly; leave workspace gracefully; return user to
+Projects"). Showing "The requested item could not be found." as an inline
+form error when the real issue is "this project doesn't exist anymore"
+would be confusing; exiting the workspace and dropping the stale entry is
+the actually-correct response. For delete specifically, NotFound is
+treated as an effective success — deleting an already-gone project ends
+in the exact same state a successful delete would.
+**Consequence:** `EditProjectDialog` takes an `onNotFound` callback
+distinct from its generic error path; `DeleteProjectDialog`'s existing
+`onDeleted` callback is reused for both "deleted" and "was already gone."
+
+**Decision:** no new migration for `update` — the existing `projects`
+table (from TASK-005's `0002_projects.sql`) already has every column
+`update` needs.
+**Reason:** required by the task brief ("Do NOT create a redundant
+migration... Only create a migration if the actual existing schema
+requires one"); confirmed by inspecting the schema before writing any
+repository code.
+**Consequence:** `ProjectRepository::update` is pure SQL against the
+existing table; no schema change shipped with this task.
+
+**Decision:** did not redesign the SQLite/persistence architecture in
+response to TASK-005's reported real-`AppData` anomaly; a light
+(non-exhaustive) real-`AppData` spot-check of the update path was
+performed instead, and did not reproduce it.
+**Reason:** required by the task brief; TASK-005 already thoroughly
+investigated the anomaly (isolated it to something specific to the real
+`%APPDATA%` path, most likely Windows real-time protection interfering
+with a fresh WAL file from an unsigned dev binary — not a defect in
+`rusqlite`/`r2d2`/the migration runner) and 44 deterministic automated
+tests plus this task's own real-path spot-check both confirm the
+mechanism itself is correct.
+**Consequence:** no dependency, pooling, or migration-strategy changes
+were made because of the anomaly; it remains documented in
+PROJECT_STATE.md as an environment-specific observation, with a
+recommendation to spot-check manually on a normal desktop session.

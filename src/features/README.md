@@ -12,16 +12,19 @@ subfolders in advance.
 
 ## Current contents
 
-- `projects/` — the Project domain (list, create, select, delete,
-  detail view). The first feature to actually need the
-  `components/`/`services/` split described above:
-  - `ProjectsView.tsx` — feature root; owns list/selection/dialog state.
-  - `components/` — `ProjectList`, `ProjectDetail`, `CreateProjectDialog`,
-    `DeleteProjectDialog`.
+- `projects/` — the Project domain: list, create, delete, and a Project
+  Workspace (Overview + reserved Processes/Captures/Documentation tabs)
+  for viewing and editing a selected project. The first feature to
+  actually need the `components/`/`services/` split described above:
+  - `ProjectsView.tsx` — feature root; owns the project list and
+    `activeProject` (list vs. workspace) state.
+  - `components/` — `ProjectList`, `ProjectWorkspace` (workspace shell:
+    back nav, header, tabs), `ProjectOverview` (the Overview tab),
+    `CreateProjectDialog`, `EditProjectDialog`, `DeleteProjectDialog`.
   - `services/projects.ts` — Tauri `invoke()` wrappers
-    (`createProject`/`listProjects`/`getProject`/`deleteProject`), per
-    the "feature-specific service calls live in
+    (`createProject`/`listProjects`/`getProject`/`updateProject`/
+    `deleteProject`), per the "feature-specific service calls live in
     `features/<feature>/services/`" convention from TASK-002.
-  - No `hooks/`, `types/` (the `Project`/`CreateProjectInput` types live
-    directly in `services/projects.ts`, next to the IPC calls that define
-    them), or `tests/` subfolder yet — nothing needs them.
+  - No `hooks/`, `types/` (the `Project`/`*Input` types live directly in
+    `services/projects.ts`, next to the IPC calls that define them), or
+    `tests/` subfolder yet — nothing needs them.
