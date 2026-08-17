@@ -132,3 +132,63 @@ consistent with the project's "no secrets in source control" rule, even
 though no `.env`-based configuration exists yet.
 **Consequence:** a one-line `.gitignore` addition; no `.env` file was
 created.
+
+## TASK-003 — Application shell and navigation
+
+**Decision:** lightweight `useState`-based navigation in `App.tsx`
+(`AppView` type + a `Record<AppView, () => ReactNode>` page map), no
+routing library installed.
+**Reason:** the shell has exactly two views and no requirement yet for
+deep-linking, browser back/forward, or nested routes — a router would add
+a dependency and API surface with nothing to justify it. The `PAGES` map
+is deliberately shaped so it's a mechanical swap for real routes later
+(see `docs/architecture.md` §16).
+**Consequence:** adding a third page is a one-line addition to `NAV_ITEMS`
+and `PAGES`; adopting `react-router` later means replacing the map with
+`<Route>` elements and the `useState` with the router's location — no
+change needed to `AppShell`, `Sidebar`, or `Header`.
+
+**Decision:** application shell built from three layout components
+(`AppShell`, `Sidebar`, `Header` in `components/layout/`) plus one reused
+generic component (`EmptyState` in `components/ui/`); no other generic
+`ui/` components were created.
+**Reason:** these are the only pieces actually reused or structurally
+necessary right now — `AppShell`/`Sidebar`/`Header` because the shell
+itself needs them, `EmptyState` because both placeholder pages use it
+identically. Nothing else in the shell repeats.
+**Consequence:** `Projects`/`Settings` page-specific content (the "New
+Project" button, copy) stays in each page file rather than being
+abstracted into shared components it doesn't need.
+
+**Decision:** introduced a small CSS design-token layer
+(`src/styles/tokens.css`: color, spacing, radius, font) that `src/App.css`
+builds on, instead of a CSS framework or CSS-in-JS library.
+**Reason:** the shell needs consistent, reusable values (background,
+surface, border, text, accent, spacing, radius) but not a full design
+system; a plain CSS custom-properties file is zero-dependency and
+sufficient at this scale.
+**Consequence:** future UI should use the existing tokens rather than
+hard-coding new colors/spacing; the `prefers-color-scheme: dark` variant
+already established in TASK-001 was preserved by giving the same tokens
+dark-mode overrides.
+
+**Decision:** the Rust connectivity check (`check_foundation_status` via
+`src/services/foundation.ts`) is now surfaced in the header as a status
+dot + short label ("Ready" / "Connecting…" / "Offline") instead of the
+previous standalone card; the raw backend message is kept only as a hover
+tooltip.
+**Reason:** the product requirement is a subtle, non-technical status
+indicator ("Good: ● Connected. Avoid: check_foundation_status: true") —
+mapping the three connectivity states to plain labels satisfies that
+without hiding the underlying detail entirely (it's still available on
+hover for debugging).
+**Consequence:** no change to the underlying service or Rust command; the
+proof-of-life mechanism from TASK-001 continues to work unmodified.
+
+**Decision:** `tauri.conf.json` now sets `minWidth`/`minHeight` (760×480)
+on the main window.
+**Reason:** the two-pane shell (sidebar + content) needs a floor to stay
+usable; the framework default has no minimum, so the window could
+otherwise be resized small enough to make the sidebar or content
+unreadable.
+**Consequence:** users cannot resize the GoLive window below 760×480.

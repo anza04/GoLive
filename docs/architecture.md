@@ -72,10 +72,12 @@ Conventions per folder:
 - **`utils/`** — Small, pure, framework-agnostic helpers with no domain
   ownership. Currently empty.
 
-**Current contents:** `App.tsx` (the whole application shell today) and
-`services/foundation.ts` (the one Tauri wrapper that exists). Every other
-folder holds only its explanatory README — this is expected at M0, not a
-gap.
+**Current contents:** `App.tsx` composes the application shell (see §16).
+`components/layout/` holds `AppShell`, `Sidebar`, `Header`; `components/ui/`
+holds the one generic piece reused so far, `EmptyState`. `pages/` holds
+`ProjectsPage` and `SettingsPage` (both placeholders — no data). `types/`
+holds `navigation.ts`. `services/foundation.ts` is still the only Tauri
+wrapper. `stores/` and `utils/` remain empty — nothing needs them yet.
 
 ## 3. Current Rust/Tauri structure
 
@@ -322,8 +324,58 @@ working one just to shrink the list.
 No dependency was added or removed by this task; `tauri-plugin-opener` was
 already removed in TASK-001 and is not reintroduced.
 
+## 16. Application shell & navigation
+
+**CURRENT**, established by TASK-003.
+
+- **Layout components** (`src/components/layout/`): `AppShell` (structural
+  frame — sidebar / header / scrollable content region), `Sidebar`
+  (persistent left navigation), `Header` (active area title + a
+  non-technical connectivity indicator). Each is presentation-only and
+  owns no navigation or connectivity state itself — that's passed in as
+  props by `App.tsx`.
+- **Generic reusable UI** (`src/components/ui/`): currently just
+  `EmptyState`, reused by both placeholder pages. New components go here
+  only once actually reused (see §2's `components/` convention).
+- **Pages** (`src/pages/`): `ProjectsPage.tsx` and `SettingsPage.tsx`,
+  both empty-state placeholders — no data, no persistence, no business
+  logic.
+- **Navigation:** `App.tsx` owns `activeView` (`useState<AppView>`,
+  `AppView`/`NavItem` defined in `src/types/navigation.ts`) and passes it
+  and a setter down to `Sidebar` and `Header` as props — no store needed
+  since only `App.tsx` and its two direct children touch it. Which page
+  renders for which view is a small `Record<AppView, () => ReactNode>` map
+  in `App.tsx`.
+- **Why no routing library:** with exactly two views and no deep-linking
+  or browser back/forward requirement yet, `react-router` (or similar)
+  would add a dependency and API surface with nothing to justify it (see
+  DECISIONS.md). The `Record<AppView, ...>` map is deliberately shaped so
+  swapping it for a router later is mechanical:
+  - each `PAGES` entry becomes a `<Route path="/..." element={<... />} />`;
+  - `activeView` / `setActiveView` are replaced by the router's own
+    location state / `navigate()`;
+  - `Sidebar`'s `onNavigate` callback becomes a `<Link>` or `navigate()`
+    call.
+  - `AppShell`, `Sidebar`, and `Header` need no changes either way, since
+    none of them depends on how navigation state is implemented.
+- **Styling:** `src/styles/tokens.css` defines the design tokens (color,
+  spacing, radius, font — including a `prefers-color-scheme: dark`
+  variant, continuing what TASK-001's scaffold already did). `src/App.css`
+  holds the shell/page CSS built on those tokens. No CSS framework or
+  CSS-in-JS dependency was introduced.
+- **Window sizing:** `tauri.conf.json` now sets `minWidth`/`minHeight`
+  (760×480) so the sidebar and content stay usable if the user shrinks the
+  window.
+- **Connectivity status:** unchanged mechanism — `App.tsx` still calls
+  `checkFoundationStatus()` from `src/services/foundation.ts` on mount.
+  The result now renders as a small status dot + label in `Header`
+  ("Ready" / "Connecting…" / "Offline") instead of the old standalone
+  card; the raw backend message is kept only as a hover tooltip, not
+  shown in the main UI, per the "no technical details in normal user
+  flow" rule.
+
 ## Status
 
-Reflects the state after **TASK-002** (architecture hardening — no product
-functionality added). See [PROJECT_STATE.md](../PROJECT_STATE.md) for the
-authoritative current implementation status.
+Reflects the state after **TASK-003** (application shell and navigation —
+no product functionality added). See [PROJECT_STATE.md](../PROJECT_STATE.md)
+for the authoritative current implementation status.

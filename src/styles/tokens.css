@@ -1,0 +1,41 @@
+/* Design tokens — the small, shared vocabulary the shell's CSS is built
+ * from. Not a full design system: just enough to keep colors, spacing,
+ * radius, and typography consistent as more UI is added. */
+:root {
+  --color-bg: #f3f3f5;
+  --color-surface: #ffffff;
+  --color-border: #e1e1e6;
+  --color-text: #1b1b1f;
+  --color-text-secondary: #57575e;
+  --color-accent: #106ebe;
+  --color-accent-soft: #e5f1fa;
+  --color-success: #1e7b34;
+  --color-danger: #b3261e;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+
+  --font-sans:
+    "Segoe UI", Inter, -apple-system, Avenir, Helvetica, Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #202023;
+    --color-surface: #2a2a2e;
+    --color-border: #3a3a3f;
+    --color-text: #f0f0f2;
+    --color-text-secondary: #b5b5bc;
+    --color-accent: #4db8ff;
+    --color-accent-soft: #1c3a4d;
+    --color-success: #7cd992;
+    --color-danger: #f28b82;
+  }
+}

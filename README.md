@@ -10,12 +10,13 @@ functional specification.
 
 ## Current status
 
-**Milestone M0 — Foundation.** This is the initial technical scaffold only:
-a Tauri 2 + React + TypeScript + Rust desktop application that launches a
-window and verifies the frontend can call into the Rust backend. No product
+**Milestone M0 — Foundation.** The application has its initial desktop
+shell: a sidebar (Projects / Settings), a header with a live backend
+connectivity indicator, and placeholder Projects/Settings pages. No product
 functionality (projects, captures, recording, AI, etc.) has been implemented
-yet. See [PROJECT_STATE.md](PROJECT_STATE.md) for the authoritative current
-state and [TASK_INDEX.md](TASK_INDEX.md) for what's planned next.
+yet — the pages are empty states with no data or persistence. See
+[PROJECT_STATE.md](PROJECT_STATE.md) for the authoritative current state
+and [TASK_INDEX.md](TASK_INDEX.md) for what's planned next.
 
 ## Development prerequisites
 

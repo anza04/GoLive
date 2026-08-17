@@ -7,7 +7,7 @@ Current milestone:
 M0 — Foundation
 
 Completed:
-TASK-001, TASK-002
+TASK-001, TASK-002, TASK-003
 
 ## Current implementation
 
@@ -15,17 +15,32 @@ TASK-001, TASK-002
 - React + TypeScript frontend (Vite)
 - Rust backend with a single proof-of-life command
   (`check_foundation_status`) verifying React → Tauri → Rust connectivity
-- Windows desktop application window (title "GoLive")
-- Basic application shell displaying "GoLive" / "Project foundation ready."
-  and a live backend connectivity status ("Rust backend connected.")
+- Windows desktop application window (title "GoLive", min size 760×480)
+- GoLive application shell: persistent sidebar (Projects / Settings) with
+  a clear active state, header showing the active area's title and a
+  non-technical connectivity indicator ("Ready" / "Connecting…" /
+  "Offline"), scrollable main content area
+- Projects placeholder page — empty state, no project data or persistence
+- Settings placeholder page — empty state, no settings implemented
+- Reusable application layout components (`AppShell`, `Sidebar`, `Header`
+  in `src/components/layout/`) and one reused generic UI component
+  (`EmptyState` in `src/components/ui/`)
+- Lightweight React-state navigation (`App.tsx` + `src/types/navigation.ts`)
+  structured so it can be swapped for a real router later without touching
+  the layout components (see `docs/architecture.md` §16)
+- Existing React → Tauri → Rust connectivity status retained unchanged —
+  still calls `checkFoundationStatus()` from `src/services/foundation.ts`,
+  now surfaced via the header status indicator instead of a standalone card
+- Design tokens (`src/styles/tokens.css`: color, spacing, radius, font,
+  incl. a dark-mode variant) backing the shell's CSS (`src/App.css`)
 - Frontend folder scaffold (`components/`, `features/`, `pages/`,
-  `services/`, `stores/`, `types/`, `utils/`) with placeholder READMEs
-  describing intended purpose — no logic in any of them yet
+  `services/`, `stores/`, `types/`, `utils/`) — `features/`, `stores/`,
+  `utils/` still placeholders; the rest now hold real shell code
 - `docs/architecture.md` documenting the current layering and folder
   structure
 - Windows installer (NSIS) build pipeline configured and verified
 - Frontend → Tauri communication convention established and applied:
-  `App.tsx` now calls `checkFoundationStatus()` from
+  `App.tsx` calls `checkFoundationStatus()` from
   `src/services/foundation.ts` instead of calling `invoke()` directly
 - `.gitignore` explicitly excludes `.env`/`.env.*` as a defensive secrets
   guard
@@ -91,6 +106,19 @@ service layer): `npx tsc --noEmit`, `npm run build`, `cargo check`, and
 "GoLive" / "Project foundation ready." / "Rust backend connected." — no
 behavior change, only where the `invoke()` call lives.
 
+**TASK-003 validation:** `npx tsc --noEmit`, `npm run build`, `cargo
+check`, and `npm run tauri build` all pass. Structural/behavioral UI
+validation was done against the Vite dev server in a browser preview
+(accessibility tree, computed styles, and a real click on the Settings nav
+item confirming the active state and page content both update correctly);
+the native `golive.exe` was then built and launched separately and
+confirmed running via `tasklist` (killed after verification) to validate
+the real Tauri/WebView2 environment, not just the browser preview. A
+pixel-level screenshot of the native window was not possible in this
+environment (no desktop screenshot capability), so visual verification
+relied on the dev-server browser preview, which renders the identical
+React/CSS.
+
 ## Not implemented yet
 
 - Database (SQLite), migrations, repositories
@@ -118,4 +146,4 @@ behavior change, only where the `invoke()` call lives.
 
 ## Next task
 
-TASK-003
+TASK-004

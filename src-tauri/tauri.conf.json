@@ -14,7 +14,9 @@
       {
         "title": "GoLive",
         "width": 900,
-        "height": 640
+        "height": 640,
+        "minWidth": 760,
+        "minHeight": 480
       }
     ],
     "security": {
