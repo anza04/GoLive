@@ -5,10 +5,11 @@ interface ProjectOverviewProps {
   project: Project;
 }
 
-// Informational-only preview of what a project will eventually own
-// (TASK-007+). No clickable/functional-looking controls.
+// Informational-only preview of what a project still doesn't have real
+// functionality for. "Processes" was removed from this list in TASK-007
+// — it's now a real, working workspace tab, not a placeholder. No
+// clickable/functional-looking controls here.
 const FUTURE_SECTIONS = [
-  { title: "Processes", description: "Document the processes collected from users." },
   { title: "Captures", description: "Review screenshots and recordings." },
   { title: "Documentation", description: "Generate the final process documentation." },
 ] as const;

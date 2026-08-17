@@ -397,6 +397,9 @@ button {
 }
 
 .project-list-item__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   font-size: 0.75rem;
   color: var(--color-text-secondary);
 }
@@ -407,7 +410,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
-  max-width: 720px;
+  max-width: 880px;
 }
 
 .workspace__back {
@@ -530,4 +533,91 @@ button {
   margin: 0;
   font-size: 0.85rem;
   color: var(--color-text-secondary);
+}
+
+/* Processes tab (list + detail, nested inside the Project Workspace —
+   deliberately kept simple rather than a second workspace/back-nav
+   layer; reuses .project-list / .project-list-item and
+   .reserved-sections from above). */
+
+.processes-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+}
+
+.processes-list-pane {
+  width: 260px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.processes-detail-pane {
+  flex: 1;
+  min-width: 0;
+}
+
+.process-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.process-detail__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.process-detail__name {
+  margin: 0 0 var(--space-2);
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.process-detail__description {
+  margin: 0;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  max-width: 55ch;
+}
+
+.process-detail__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+/* Status badge — small pill showing a Process's lifecycle status, never
+   the raw enum value. */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-badge--draft {
+  background-color: var(--color-bg);
+  color: var(--color-text-secondary);
+}
+
+.status-badge--in_progress {
+  background-color: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+
+.status-badge--completed {
+  background-color: var(--color-accent-soft);
+  color: var(--color-success);
 }

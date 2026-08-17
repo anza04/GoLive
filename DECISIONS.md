@@ -388,7 +388,9 @@ correct behavior today, matching the "don't create cascading
 relationships to tables that don't yet exist" instruction.
 **Consequence:** a deleted project is unrecoverable through the UI. This
 should be revisited once real project *contents* (captures, recordings)
-exist and a delete has more to lose.
+exist and a delete has more to lose. (TASK-007 note: this is exactly
+what happened — `processes` now cascades from `projects` at the database
+level; see below.)
 
 **Decision:** `rusqlite_migration` (added in TASK-004) is not reused —
 migrations remain the hand-rolled `PRAGMA user_version` runner; the new
@@ -510,3 +512,112 @@ mechanism itself is correct.
 were made because of the anomaly; it remains documented in
 PROJECT_STATE.md as an environment-specific observation, with a
 recommendation to spot-check manually on a normal desktop session.
+
+## TASK-007 — Process domain, persistence, and Workspace UI
+
+**Decision:** `Process.project_id` is a real SQL foreign key
+(`REFERENCES projects(id) ON DELETE CASCADE`), and deleting a Project's
+Processes is left entirely to that constraint — no
+`ProcessRepository::delete_by_project` and no loop in `ProjectService`.
+**Reason:** required by the task brief ("Do not manually implement a
+loop deleting processes from ProjectService. The database relationship
+owns this behavior."); a database-level cascade is also atomic (can't
+leave a project deleted with orphaned processes if the app crashes
+mid-loop) and correct by construction rather than by an application
+invariant someone has to remember to maintain as more child tables
+appear later (Captures, Recordings, ...).
+**Consequence:** `ProjectRepository`/`ProjectService` have zero knowledge
+Processes exist — deleting a project is exactly the same one `DELETE FROM
+projects WHERE id = ?` it always was. Proven by
+`repositories::process::tests::deleting_a_project_cascades_to_its_processes`,
+which creates two processes under one project, deletes the project via
+`ProjectRepository`, and asserts both processes are gone. Requires
+`PRAGMA foreign_keys = ON` on the deleting connection, which the pool
+already sets on every connection (TASK-004) — this task didn't need to
+add anything for the pragma itself, only the `ON DELETE CASCADE` clause
+in the migration.
+
+**Decision:** `ProcessStatus` is a real Rust enum with hand-written
+`rusqlite::{ToSql, FromSql}` impls (not a bare `String` column with
+validation only in the service), and derives `Serialize`/`Deserialize`
+with `rename_all = "snake_case"` so the same three lowercase strings
+(`draft`/`in_progress`/`completed`) are used in SQLite, in the Rust type,
+and in the frontend's `ProcessStatus` TypeScript union.
+**Reason:** required by the task brief ("represented as a Rust enum
+rather than arbitrary strings inside business logic... Do not use
+database integers for status"). Implementing `ToSql`/`FromSql` (rather
+than converting to/from `String` manually at every repository call site)
+keeps the repository's SQL binding/reading code exactly as simple as it
+is for any other typed column, and makes an invalid stored value a
+`rusqlite::Error` (mapped to the existing `AppError::Database`) instead
+of a silent default or a panic.
+**Consequence:** adding a status is a three-place, compiler-checked
+change (the enum variant, `as_str`, `parse`) rather than a
+string-matching bug waiting to happen; the frontend's `ProcessStatus`
+union needs no separate mapping table for the wire values, only a
+separate `STATUS_LABEL` map for *display* text (`ProcessStatusBadge`).
+
+**Decision:** `ProcessService` holds both `Box<dyn ProcessRepository>`
+and `Box<dyn ProjectRepository>`, and `create` explicitly verifies the
+parent project exists before inserting.
+**Reason:** required by the task brief ("When creating a Process: 1.
+verify the Project exists 2. create the Process"). The foreign key alone
+would already reject an insert against a nonexistent `project_id` — but
+as a generic constraint-violation `rusqlite::Error`, which our
+`From<rusqlite::Error> for AppError` maps to the generic `AppError::
+Database` ("A local database operation failed."). The explicit check
+gives the accurate, specific `AppError::NotFound` instead — the FK
+remains a correctness backstop, the check is about error quality.
+**Consequence:** `ProcessService::new` takes two repositories, unlike
+every other service in this codebase so far, which take one — this is a
+direct, justified consequence of Process being the first entity with a
+required parent, not a pattern to generalize to other services without
+the same reason.
+
+**Decision:** default Process order is `updated_at DESC` within a
+project (`idx_processes_project_id_updated_at`), matching Project's
+existing convention exactly.
+**Reason:** required by the task brief; same reasoning as TASK-005's
+Project ordering — the process the consultant is actively documenting
+should be at the top.
+**Consequence:** `list_by_project` always applies this order; no sorting
+UI exists.
+
+**Decision:** Process selection state (`ProcessesView`'s `selectedId:
+string | null`) stays a plain id, not promoted to holding the full
+`Process` record the way Project's `activeProject` was in TASK-006.
+**Reason:** Processes live inside an already-scoped Project Workspace
+tab as a simple list+detail pane, not a second nested workspace with its
+own back-navigation — the task explicitly asked to "keep the
+architecture simple" and showed a list→detail (not list→full-page)
+layout. A plain id plus `.find()` over the already-loaded list is
+sufficient for a detail pane that's never unmounted/remounted the way a
+whole-workspace swap would be.
+**Consequence:** `ProcessesView` structurally mirrors TASK-005's
+original `ProjectsView` (before TASK-006 introduced the workspace
+concept for Projects), not TASK-006's current `ProjectsView` — a
+deliberate, documented choice not to over-generalize the workspace
+pattern to every parent/child relationship.
+
+**Decision:** `list_processes` takes an explicit
+`ListProcessesInput { project_id }` struct parameter instead of a bare
+`project_id: String` command parameter.
+**Reason:** Tauri's default argument handling camelCases bare command
+parameter names for the JS-facing call (so a bare `project_id` parameter
+would expect `invoke(cmd, { projectId })` from the frontend) — a
+convention every other command in this codebase happens to never have
+exercised, since every existing bare parameter (`id`) is a single word
+with no case ambiguity. This project's UI verification method (a mocked
+`window.__TAURI_INTERNALS__.invoke` in a browser preview) bypasses
+Tauri's real argument extraction entirely, so it cannot independently
+confirm that convention is applied correctly for a real build. Wrapping
+the scalar in a struct removes the ambiguity outright: the top-level
+parameter name (`input`) is single-word and case-invariant, and the
+struct field (`project_id`) is matched by serde's literal field-name
+deserialization, not Tauri's argument-name conversion — both sides now
+depend only on mechanisms already proven correct by
+`create_project`/`update_project`.
+**Consequence:** one small `ListProcessesInput` struct instead of a bare
+parameter; `list_processes` now has the same "wrap it in a struct" shape
+as `create_process`/`update_process`, for consistency and to close a
+real verification gap, not for its own sake.

@@ -87,4 +87,46 @@ mod tests {
             .expect("querying sqlite_master should succeed");
         assert_eq!(count, 1, "app_metadata table should exist after migrations");
     }
+
+    #[test]
+    fn processes_table_and_indexes_exist_after_migrations() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = DbService::init(dir.path()).expect("db init should succeed");
+        let conn = db.pool().get().expect("pooled connection");
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'processes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("querying sqlite_master should succeed");
+        assert_eq!(table_count, 1, "processes table should exist after migrations");
+
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'processes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("querying sqlite_master should succeed");
+        assert!(
+            index_count >= 2,
+            "expected at least the project_id and project_id+updated_at indexes"
+        );
+    }
+
+    #[test]
+    fn processes_foreign_key_to_projects_is_declared() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = DbService::init(dir.path()).expect("db init should succeed");
+        let conn = db.pool().get().expect("pooled connection");
+
+        let fk_target: String = conn
+            .query_row("SELECT \"table\" FROM pragma_foreign_key_list('processes')", [], |row| {
+                row.get(0)
+            })
+            .expect("processes should declare a foreign key");
+        assert_eq!(fk_target, "projects");
+    }
 }

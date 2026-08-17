@@ -7,7 +7,7 @@ Current milestone:
 M0 — Foundation
 
 Completed:
-TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006
+TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007
 
 ## Current implementation
 
@@ -76,6 +76,65 @@ TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006
     (TASK-006 added `isNotFoundError()` for graceful NotFound handling)
   - `Settings` unaffected: `Local storage: Ready` continues to work
     unchanged
+- **Process domain (TASK-007)** — GoLive's second real domain entity,
+  related 1:N to Project (`Project 1 ─── N Process`), nested inside the
+  Project Workspace:
+  - Domain model `Process { id, project_id, name, description, status,
+    created_at, updated_at }` (`src-tauri/src/models/process.rs`);
+    `status` is a real `ProcessStatus` Rust enum (`Draft` / `InProgress` /
+    `Completed`) implementing `rusqlite`'s `ToSql`/`FromSql` directly and
+    serializing as one of three stable lowercase strings — the same
+    representation in SQLite, the Rust wire format, and the frontend
+    `ProcessStatus` TypeScript union
+  - `processes` SQLite table (`src-tauri/migrations/0003_processes.sql`,
+    additive — `0001`/`0002` untouched):
+    `project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE`,
+    indexed on `project_id` and `(project_id, updated_at DESC)`.
+    **Deleting a Project cascades to delete its Processes at the database
+    level** — no application-side loop, proven by an automated test
+  - `ProcessRepository` trait + `SqliteProcessRepository`
+    (`src-tauri/src/repositories/process.rs`): create/list_by_project
+    (scoped to one project, `updated_at DESC`)/get/update/delete — same
+    shape as `ProjectRepository`; `update`'s SQL never touches `id`,
+    `project_id`, or `created_at`
+  - `ProcessService` (`src-tauri/src/services/process.rs`) holds *both*
+    `ProcessRepository` and `ProjectRepository`: `create` confirms the
+    parent project exists (clean `NotFound` instead of relying solely on
+    the foreign key) before writing, and always sets `status: Draft` —
+    the frontend cannot specify status on create. `update` validates/
+    trims name/description (same 200/5000 limits as Project) and parses
+    the status string via `ProcessStatus::parse`, rejecting anything
+    else with `AppError::Validation`
+  - Tauri commands `create_process` / `list_processes` / `get_process` /
+    `update_process` / `delete_process`
+    (`src-tauri/src/commands/process.rs`) — thin, delegate to
+    `ProcessService`. `list_processes` takes an explicit
+    `ListProcessesInput { project_id }` (not a bare parameter) and
+    `update_process` an explicit `UpdateProcessInput { id, name,
+    description, status }` — no field for `project_id`/`created_at`/
+    `updated_at` to occupy
+  - No new `AppError` variants needed — reuses `Validation`/`NotFound`
+  - Frontend service `src/features/projects/services/processes.ts` —
+    typed `createProcess`/`listProcesses`/`getProcess`/`updateProcess`/
+    `deleteProcess`
+  - **Processes tab activated** in `ProjectWorkspace` (was disabled since
+    TASK-006): tabs are now real state (`activeTab`, was a fixed
+    constant), with an `available` flag per tab — Overview and Processes
+    enabled, Captures/Documentation still genuinely `disabled`.
+    `ProjectWorkspace` is now mounted with `key={project.id}` so
+    switching projects resets the active tab to Overview
+  - `ProcessesView` (the Processes tab's content): list + detail pane
+    (deliberately simpler than the Project Workspace's own
+    list→full-workspace pattern — Processes doesn't get a second nested
+    workspace), its own loading/error/empty states, "+ New process"
+    entry point, `ProcessList` (name, `ProcessStatusBadge`, updated
+    date), `ProcessDetail` (name, description, status, dates, Edit/
+    Delete, and two reserved informational cards — "Captures" / "AI
+    analysis"), `CreateProcessDialog` (no status field), `EditProcessDialog`
+    (adds a status `<select>`), `DeleteProcessDialog` — all reuse the
+    shared `components/ui/Dialog`
+  - `ProjectOverview`'s reserved-sections list dropped "Processes" — no
+    longer a placeholder
 - Settings placeholder page — empty state, no other settings implemented
 - Reusable application layout components (`AppShell`, `Sidebar`, `Header`
   in `src/components/layout/`) and one reused generic UI component
@@ -111,11 +170,13 @@ TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006
   Idempotent — safe on every launch, never recreates or destroys existing
   data. A failure here prevents the app from starting rather than being
   silently ignored.
-- **Versioned migrations** (`src-tauri/migrations/0001_initial.sql`,
-  applied by a small hand-rolled runner using SQLite's `user_version`
-  pragma — see DECISIONS.md for why this isn't a third-party crate).
-  Contains only a minimal `app_metadata` infrastructure table — no
-  Project/Capture/Process/Recording schema yet
+- **Versioned migrations** (`src-tauri/migrations/`: `0001_initial.sql`
+  — infrastructure-only `app_metadata` table; `0002_projects.sql` —
+  `projects`; `0003_processes.sql` — `processes` with a
+  `project_id ... ON DELETE CASCADE` foreign key to `projects`; applied
+  by a small hand-rolled runner using SQLite's `user_version` pragma —
+  see DECISIONS.md for why this isn't a third-party crate). No
+  Capture/Recording schema yet
 - **Repository boundary**: `StorageStatusRepository` trait +
   `SqliteStorageStatusRepository` implementation — the concrete
   instantiation of the persistence pattern TASK-002 documented, scoped to
@@ -337,9 +398,54 @@ reported as an observation, not treated as confirmation the TASK-005
 anomaly can't recur — per this task's instruction, no infrastructure
 changes were made in response to either result.
 
+**TASK-007 validation:** `npx tsc --noEmit`, `npm run build`, `cargo
+check` (no warnings), `cargo test` (63/63 passing — 44 pre-existing + 19
+new: 11 repository tests covering create/list-by-project/list-ordering/
+update incl. id-project_id-created_at immutability/delete/not-found
+variants/cascade-delete/reopen-persistence, plus 2 new `db` tests
+confirming the `processes` table, its indexes, and its foreign key exist
+after migration, and 15 service tests covering create incl. Draft
+default/trimming/all four validation-rejection cases/missing-project,
+update incl. status change/invalid-status rejection/timestamp
+regeneration+preservation, and delete), and `npm run tauri build` all
+pass.
+
+Full UI-flow verification (Projects → create project → workspace opens →
+Processes tab now enabled, Captures/Documentation confirmed still
+`disabled` via `element.disabled === true` → empty state → create process
+→ appears with "Draft" badge, auto-selected → detail shows name/
+description/status/dates/reserved "Captures"+"AI analysis" cards → Edit:
+values pre-filled incl. status select → Cancel discards (verified against
+both UI and mock backend state) → Edit again, change status to "In
+progress" → Save persists, badge/dates update immediately → create a
+second process → edit the first again (status → "Completed") → confirms
+it moves back to the top of the list → Delete requires confirmation →
+deleting returns to the empty state → re-added a process, then deleted
+the **Project** itself from the workspace → confirmed via mock state
+(`window.__mockProjects`/`window.__mockProcesses`) that both the project
+and its process were removed, proving the cascade → Settings still works)
+was verified against the Vite dev server with the same mocked-IPC
+approach as TASK-005/006, extended to cover all five Process commands
+(with the mock strictly validating the `{ input: { project_id } }` /
+`{ input: { project_id, name, description } }` shapes the frontend
+service sends) and project-delete cascade. The native `golive.exe` was
+built and launched separately (both before and after the temporary
+real-`AppData` spot-check below) and confirmed running via `tasklist`
+against the real, schema-upgraded (`user_version = 3`) database.
+
+**Real-`AppData` Process persistence:** a light spot-check (a temporary
+`cargo run --example`, deleted before commit) created a project and a
+process, updated the process in a second process invocation, then listed
+it in a third — each step returned exactly what the previous one had
+written (`created_at` preserved, `updated_at` changed, status/name
+updated). No anomaly reproduced this time either; per this task's
+explicit instruction, this is reported as an observation only, and no
+speculative infrastructure changes were made because of either this or
+TASK-005's earlier finding.
+
 ## Not implemented yet
 
-- Processes, Captures
+- Captures
 - Screenshots (full-screen / monitor / area)
 - Screen recording, microphone recording
 - Floating widget, global hotkeys
@@ -362,4 +468,4 @@ changes were made in response to either result.
 
 ## Next task
 
-TASK-007
+TASK-008

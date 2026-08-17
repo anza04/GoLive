@@ -8,4 +8,5 @@
 | TASK-004 | Local SQLite data layer | DONE |
 | TASK-005 | Project domain and persistence | DONE |
 | TASK-006 | Project workspace and editing | DONE |
-| TASK-007 | Process domain and persistence | TODO |
+| TASK-007 | Process domain, persistence and basic UI | DONE |
+| TASK-008 | Process capture architecture / capture session foundation | TODO |

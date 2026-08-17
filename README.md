@@ -11,16 +11,19 @@ functional specification.
 ## Current status
 
 **Milestone M0 — Foundation.** GoLive can create, list, and delete
-**projects**, and selecting one opens its **Project Workspace**, where
-its name and description can be edited (with save/cancel) and an
-Overview shows creation/update dates. Everything persists locally in
-SQLite and survives application restarts. The workspace also has a
-navigation structure for what a project will eventually contain
-(Processes, Captures, Documentation) — clearly marked "Not available
-yet," not implemented. The application shell has a sidebar
-(Projects / Settings), a header with a live backend connectivity
-indicator, and a Settings page showing local storage status. No
-process/capture/recording/AI functionality exists yet. See
+**projects**; selecting one opens its **Project Workspace**, where its
+name/description can be edited and an Overview shows creation/update
+dates. Each project can now contain **processes** — the business
+workflows a consultant is documenting (e.g. "Create a sales order") —
+with their own create/list/select/edit/delete, a status
+(Draft / In progress / Completed), and a detail view. Everything persists
+locally in SQLite and survives application restarts; deleting a project
+also deletes its processes. The workspace still has "Captures" and
+"Documentation" reserved but clearly marked "Not available yet" — not
+implemented. The application shell has a sidebar (Projects / Settings), a
+header with a live backend connectivity indicator, and a Settings page
+showing local storage status. No capture/recording/AI/transcription/
+documentation-generation functionality exists yet. See
 [PROJECT_STATE.md](PROJECT_STATE.md) for the authoritative current state
 and [TASK_INDEX.md](TASK_INDEX.md) for what's planned next.
 

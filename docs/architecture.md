@@ -93,6 +93,7 @@ src-tauri/
   migrations/
     0001_initial.sql        infrastructure-only migration (see §17)
     0002_projects.sql        Project domain schema (see §18)
+    0003_processes.sql        Process domain schema (see §20)
   src/
     main.rs                 entry point
     lib.rs                  Tauri builder, .setup() hook, command registration
@@ -100,21 +101,27 @@ src-tauri/
     commands/
       foundation.rs           check_foundation_status
       storage.rs               get_local_storage_status
-      project.rs                create/list/get/delete_project (see §18)
+      project.rs                create/list/get/update/delete_project (§18)
+      process.rs                 create/list/get/update/delete_process (§20)
     db/
       mod.rs                   DbService: init, pool access
       pool.rs                  r2d2 pool construction + PRAGMAs
       migrations.rs            migration runner
     models/
       project.rs                Project struct (see §18)
+      process.rs                  Process struct + ProcessStatus enum (§20)
     repositories/
       storage_status.rs        StorageStatusRepository trait +
                                 SqliteStorageStatusRepository
       project.rs                 ProjectRepository trait +
                                   SqliteProjectRepository (see §18)
+      process.rs                  ProcessRepository trait +
+                                   SqliteProcessRepository (see §20)
     services/
       project.rs                 ProjectService: validation, id/timestamp
                                   generation (see §18)
+      process.rs                  ProcessService: validation, id/timestamp
+                                   generation, project-existence check (§20)
 ```
 
 `commands/`, `db/`, and `repositories/` were introduced by TASK-004.
@@ -122,6 +129,8 @@ src-tauri/
 domain gave them real content — `db::DbService` was always
 infrastructure, not domain logic, so it didn't count as a reason to add
 `services/` on its own; `ProjectService` is the first actual occupant.
+TASK-007 added a sibling `process.rs` file to each of these modules for
+the Process domain, following the exact same shape.
 
 ## 4. Frontend → Tauri communication
 
@@ -194,17 +203,21 @@ render/relay the result — it should not itself decide what the rule is.
 
 ## 6. Persistence boundary
 
-**CURRENT.** SQLite persistence infrastructure (TASK-004) now has its
-first real domain occupant: the Project entity (TASK-005). See §17 for
-the infrastructure and §18 for the Project-specific detail.
+**CURRENT.** SQLite persistence infrastructure (TASK-004) now has two
+related domain occupants: Project (TASK-005) and Process (TASK-007),
+related 1:N with `Process.project_id` a foreign key
+(`ON DELETE CASCADE` — see §20). See §17 for the infrastructure, §18 for
+Project, §20 for Process.
 
 ```
-Application/domain logic (Rust)     CURRENT — ProjectService (§18)
-        ↓
+Application/domain logic (Rust)     CURRENT — ProjectService (§18),
+        ↓                                     ProcessService (§20)
 Repository interface (Rust trait)   CURRENT — StorageStatusRepository,
-        ↓                                     ProjectRepository
+        ↓                                     ProjectRepository,
+        ↓                                     ProcessRepository
 SQLite implementation               CURRENT — SqliteStorageStatusRepository,
-                                                SqliteProjectRepository
+                                                SqliteProjectRepository,
+                                                SqliteProcessRepository
 ```
 
 The frontend never knows SQLite exists — it only ever calls a Tauri
@@ -299,13 +312,15 @@ exists.
 ## 11. State management
 
 **CURRENT:** `App.tsx` still uses local component state (`useState`) for
-connectivity status. The Project feature owns its own state, all in
-`features/projects/ProjectsView.tsx`: the project list, loading/error
-status, which dialog (if any) is open, and — the ongoing example of
-"feature state" — **`activeProject`** (TASK-005 called this `selectedId`;
-TASK-006 renamed/promoted it to hold the full `Project`, since the
-workspace needs the whole record, not just an id to look up). No state
-management library is installed.
+connectivity status. `ProjectsView` owns `activeProject` (TASK-005 called
+this `selectedId`; TASK-006 renamed/promoted it to hold the full
+`Project`, since the workspace needs the whole record). Nested one level
+deeper, `ProcessesView` (rendered by `ProjectWorkspace`'s "Processes" tab,
+TASK-007) owns its own `selectedId: string | null` — deliberately the
+simpler, TASK-005-style shape rather than a second "active process"
+promoted to a full record, since Processes is a list+detail pane, not
+another full workspace/back-navigation layer (see §20). Neither is a
+global store. No state management library is installed.
 
 **Rule:**
 - **Local UI state** (modal open/closed, form fields, a single component's
@@ -788,9 +803,164 @@ PROJECT_STATE.md for the full record, including a light real-`AppData`
 spot-check of the update path specifically (no repeat of TASK-005's
 extensive investigation, per this task's own instruction).
 
+## 20. Process domain (TASK-007)
+
+**CURRENT.** The second real GoLive domain entity, related 1:N to
+Project:
+
+```
+Project 1 ─────── N Process
+```
+
+Process is the future parent/context for Captures, screen/microphone
+recordings, transcripts, and AI-generated analysis (see §7, §8, §9) —
+none of those are implemented yet. This task only establishes Process
+itself: creation, listing, retrieval, update, deletion, ordering, and a
+basic three-state lifecycle status.
+
+**Where Process lives in the Workspace:**
+
+```
+Project Workspace
+    ├── Overview        implemented (§19)
+    ├── Processes        implemented (this section) — list + create +
+    │                      select + detail + edit (incl. status) + delete
+    ├── Captures         NOT AVAILABLE YET (disabled tab)
+    └── Documentation    NOT AVAILABLE YET (disabled tab)
+```
+
+**Model** (`models/process.rs`): `Process { id, project_id, name,
+description, status, created_at, updated_at }`.
+- `id`, `created_at`, `updated_at`: same backend-generated,
+  never-frontend-authoritative convention as `Project` (§18).
+- `project_id`: set once at creation (after verifying the project
+  exists — see below), never changeable through update. A Process
+  belongs permanently to its Project; moving a Process between projects
+  is not implemented.
+- `status`: `ProcessStatus` — a real Rust enum (`Draft`, `InProgress`,
+  `Completed`), not a raw string used ad hoc in business logic. It
+  implements `rusqlite`'s `ToSql`/`FromSql` directly (so the repository
+  binds/reads it as a typed column, not a manually-converted `String`)
+  and derives `Serialize`/`Deserialize` with `rename_all = "snake_case"`,
+  so the exact same three lowercase strings (`draft`, `in_progress`,
+  `completed`) are used in SQLite, in the Rust enum's wire format, and in
+  the frontend's `ProcessStatus` TypeScript union — one representation,
+  three layers, no ad hoc mapping. No automatic status transitions exist;
+  the user changes status explicitly via the edit dialog.
+
+**Schema** (`migrations/0003_processes.sql`, additive — `0001`/`0002`
+untouched): `processes` table with
+`project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE`,
+indexed on `project_id` and on `(project_id, updated_at DESC)` (the
+actual, only listing query: "processes for project X, most recently
+updated first"). **Deleting a Project cascades to delete its Processes at
+the database level** — `ProjectRepository::delete` has zero knowledge
+that processes exist; the foreign key (combined with `PRAGMA
+foreign_keys = ON`, already set on every pooled connection since §17)
+owns this behavior entirely. Proven by
+`repositories::process::tests::deleting_a_project_cascades_to_its_processes`.
+
+**Repository** (`repositories/process.rs`): `ProcessRepository` trait —
+`create`, `list_by_project` (ordered `updated_at DESC`, scoped to one
+project), `get`, `update`, `delete` — same shape as `ProjectRepository`
+(§18): `update`/`delete` return whether a row existed; `update`'s `SET`
+clause never touches `id`, `project_id`, or `created_at`.
+
+**Service** (`services/process.rs`): `ProcessService` holds **two**
+repositories — `Box<dyn ProcessRepository>` and
+`Box<dyn ProjectRepository>` — because `create` needs to confirm the
+parent project exists before writing anything (docs section "Project
+ownership"). That check gives a clear `AppError::NotFound` instead of
+relying solely on the foreign key to reject an orphaned insert with a
+generic database error (the FK still exists as a defense-in-depth
+backstop — the explicit check is about error quality, not correctness).
+`create` sets `status: Draft` unconditionally; the frontend cannot
+specify status when creating. `update` parses the incoming status string
+via `ProcessStatus::parse`, returning `AppError::Validation` for anything
+else — an arbitrary frontend-supplied string is never accepted.
+
+**Commands** (`commands/process.rs`): `create_process`, `list_processes`,
+`get_process`, `update_process`, `delete_process` — thin, delegate to
+`ProcessService`. `list_processes` takes an explicit
+`ListProcessesInput { project_id }` rather than a bare `project_id:
+String` parameter — deliberately avoiding reliance on Tauri's default
+camelCase argument-name conversion for a multi-word parameter, a detail
+this project's mocked-IPC frontend verification can't independently
+confirm (see DECISIONS.md). `update_process` similarly takes an explicit
+`UpdateProcessInput { id, name, description, status }` — no
+`project_id`/`created_at`/`updated_at` field for a request to occupy.
+
+**Frontend service** (`features/projects/services/processes.ts`): typed
+`createProcess`/`listProcesses`/`getProcess`/`updateProcess`/
+`deleteProcess`, mapping wire-format `RawProcess` (`snake_case`) to a
+`Process` type (`camelCase`) — `status` needs no translation, since the
+backend already serializes it as one of the three strings the frontend's
+`ProcessStatus` union expects directly.
+
+**Frontend UI** (`features/projects/components/`):
+- `ProjectWorkspace` now tracks real `activeTab` state (`useState`,
+  previously a fixed constant since only one tab was ever enabled) — the
+  `WORKSPACE_TABS` array gained an `available` flag per tab; clicking a
+  `disabled` tab is a no-op (native `<button disabled>` behavior).
+  `ProjectsView` mounts `ProjectWorkspace` with `key={project.id}`, so
+  switching to a different project resets `activeTab` back to
+  "overview".
+- `ProcessesView` (rendered by the "Processes" tab): list + create entry
+  point + loading/error/empty states, structurally identical to
+  TASK-005's original `ProjectsView` shape (list + detail pane, not a
+  nested workspace) — see "Process selection state" below for why.
+- `ProcessList`, `ProcessDetail` (name, description,
+  `ProcessStatusBadge`, dates, Edit/Delete actions, and two reserved
+  informational cards — "Captures" / "AI analysis" — reusing the generic
+  `.reserved-sections` CSS from §19).
+- `ProcessStatusBadge` — small reusable label (`Draft` / `In progress` /
+  `Completed`); internal enum formatting is never shown directly.
+- `CreateProcessDialog` (no status field — Draft is implicit),
+  `EditProcessDialog` (adds a status `<select>` to the
+  name/description fields `EditProjectDialog` already established),
+  `DeleteProcessDialog` — all reuse `components/ui/Dialog`.
+- `ProjectOverview`'s reserved-sections list dropped "Processes" — it's
+  no longer a placeholder, it's real.
+
+**Process selection state:** kept as a plain `selectedId: string | null`
+in `ProcessesView`, not promoted to holding the full `Process` object the
+way `ProjectsView`'s `activeProject` was in TASK-006. Processes doesn't
+get its own nested workspace — selecting one shows a detail pane
+alongside the list (this task's "keep the architecture simple"
+instruction) — so there's no separate component that needs the full
+record passed down; `.find()` over the already-loaded list is enough.
+
+**Errors:** reuses `AppError::Validation` (empty/over-length
+name/description, invalid status string) and `AppError::NotFound`
+(missing project on create, missing process on get/update/delete) — no
+new `AppError` variants were needed. `EditProcessDialog` and
+`DeleteProcessDialog` handle `NotFound` gracefully via
+`isNotFoundError()`, same pattern as the Project dialogs (§19).
+
+**Testing:** 63 Rust tests (was 44) — 19 new: 11 repository tests
+(create/list-by-project/list-ordering/update incl.
+id-project_id-created_at immutability/delete/not-found variants/cascade
+delete/reopen-persistence) and 15 service tests (create incl. Draft
+default and trimming, all four validation-rejection cases, missing
+project, update incl. status change and invalid-status rejection,
+updated_at regeneration + created_at/project_id preservation, delete),
+plus 2 new `db` tests confirming the `processes` table, its indexes, and
+its foreign key exist after migrating a fresh database — all against
+isolated `tempfile::tempdir()` databases (or, for the cascade test, two
+repositories sharing one such database). Full UI flow (Processes tab
+enabled, empty state, create, list, select, detail incl. reserved
+sections, edit incl. status change and cancel-discards, save reorders the
+list to the top, delete with confirmation, empty state returns, project
+delete cascades to its processes, Captures/Documentation stay disabled)
+verified against the Vite dev server with the same mocked-IPC approach as
+TASK-005/006, extended to cover all five Process commands and project-
+delete cascade. See PROJECT_STATE.md for the full record, including a
+light real-`AppData` spot-check of the Process create/update/list path.
+
 ## Status
 
-Reflects the state after **TASK-006** (Project Workspace and editing —
-still no Process/Capture/Recording/AI functionality). See
+Reflects the state after **TASK-007** (Process domain, persistence, and
+Workspace UI — still no Captures/Recording/AI/transcription/
+documentation-generation functionality). See
 [PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
 implementation status.

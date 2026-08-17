@@ -1,0 +1,156 @@
+import { useEffect, useState } from "react";
+import { EmptyState } from "../../../components/ui/EmptyState";
+import { getErrorMessage } from "../../../utils/errorMessage";
+import { ProcessList } from "./ProcessList";
+import { ProcessDetail } from "./ProcessDetail";
+import { CreateProcessDialog } from "./CreateProcessDialog";
+import { DeleteProcessDialog } from "./DeleteProcessDialog";
+import { listProcesses, type Process } from "../services/processes";
+
+interface ProcessesViewProps {
+  projectId: string;
+}
+
+// Selection stays local to this view, mirroring ProjectsView's original
+// `selectedId` approach (before Projects grew a full workspace) — see
+// docs/architecture.md ("State management"). Processes live inside an
+// already-scoped Project Workspace tab, so a simple list+detail pane is
+// deliberately kept instead of a second nested workspace/back-navigation
+// layer, per this task's "keep the architecture simple" instruction.
+type ListState = { state: "loading" } | { state: "ready" } | { state: "error"; message: string };
+
+export function ProcessesView({ projectId }: ProcessesViewProps) {
+  const [processes, setProcesses] = useState<Process[]>([]);
+  const [listState, setListState] = useState<ListState>({ state: "loading" });
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Process | null>(null);
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  async function refresh() {
+    setListState({ state: "loading" });
+    try {
+      const result = await listProcesses(projectId);
+      setProcesses(result);
+      setListState({ state: "ready" });
+    } catch (error) {
+      setListState({ state: "error", message: getErrorMessage(error) });
+    }
+  }
+
+  function handleCreated(process: Process) {
+    setProcesses((prev) => [process, ...prev]);
+    setSelectedId(process.id);
+    setCreateOpen(false);
+  }
+
+  function handleUpdated(updated: Process) {
+    // Matches the backend's `updated_at DESC` order without a re-fetch.
+    setProcesses((prev) => [updated, ...prev.filter((process) => process.id !== updated.id)]);
+  }
+
+  function handleGone(id: string) {
+    setProcesses((prev) => prev.filter((process) => process.id !== id));
+    setSelectedId((current) => (current === id ? null : current));
+    setDeleteTarget(null);
+  }
+
+  if (listState.state === "loading") {
+    return <p className="projects-status">Loading processes…</p>;
+  }
+
+  if (listState.state === "error") {
+    return (
+      <EmptyState
+        title="Couldn't load processes"
+        description={listState.message}
+        action={
+          <button type="button" className="button" onClick={() => void refresh()}>
+            Retry
+          </button>
+        }
+      />
+    );
+  }
+
+  if (processes.length === 0) {
+    return (
+      <>
+        <EmptyState
+          title="No processes yet"
+          description="Create a process to start documenting how this project works."
+          action={
+            <button
+              type="button"
+              className="button button--primary"
+              onClick={() => setCreateOpen(true)}
+            >
+              + New process
+            </button>
+          }
+        />
+        {createOpen && (
+          <CreateProcessDialog
+            projectId={projectId}
+            onClose={() => setCreateOpen(false)}
+            onCreated={handleCreated}
+          />
+        )}
+      </>
+    );
+  }
+
+  const selectedProcess = processes.find((process) => process.id === selectedId) ?? null;
+
+  return (
+    <div className="processes-layout">
+      <div className="processes-list-pane">
+        <div className="projects-toolbar">
+          <button
+            type="button"
+            className="button button--primary"
+            onClick={() => setCreateOpen(true)}
+          >
+            + New process
+          </button>
+        </div>
+        <ProcessList processes={processes} selectedId={selectedId} onSelect={setSelectedId} />
+      </div>
+
+      <div className="processes-detail-pane">
+        {selectedProcess ? (
+          <ProcessDetail
+            process={selectedProcess}
+            onUpdated={handleUpdated}
+            onDeleteRequested={() => setDeleteTarget(selectedProcess)}
+            onGone={() => handleGone(selectedProcess.id)}
+          />
+        ) : (
+          <EmptyState
+            title="No process selected"
+            description="Select a process from the list to see its details."
+          />
+        )}
+      </div>
+
+      {createOpen && (
+        <CreateProcessDialog
+          projectId={projectId}
+          onClose={() => setCreateOpen(false)}
+          onCreated={handleCreated}
+        />
+      )}
+      {deleteTarget && (
+        <DeleteProcessDialog
+          process={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={handleGone}
+        />
+      )}
+    </div>
+  );
+}

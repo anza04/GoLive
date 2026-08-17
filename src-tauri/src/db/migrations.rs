@@ -27,6 +27,7 @@ use rusqlite::Connection;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_initial.sql")),
     (2, include_str!("../../migrations/0002_projects.sql")),
+    (3, include_str!("../../migrations/0003_processes.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<(), AppError> {

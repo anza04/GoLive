@@ -80,6 +80,7 @@ export function ProjectsView() {
     return (
       <>
         <ProjectWorkspace
+          key={activeProject.id}
           project={activeProject}
           onBack={() => setActiveProject(null)}
           onUpdated={handleUpdated}

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ProjectOverview } from "./ProjectOverview";
+import { ProcessesView } from "./ProcessesView";
 import { EditProjectDialog } from "./EditProjectDialog";
 import type { Project } from "../services/projects";
 
@@ -13,19 +14,20 @@ interface ProjectWorkspaceProps {
   onGone: () => void;
 }
 
-// The workspace's navigation structure for what a project will eventually
-// contain. Only "overview" has content today; the rest are reserved,
-// genuinely disabled (not fake-clickable) entries — see
-// docs/architecture.md for how this maps onto real routes later, the
-// same mechanical swap already documented for the top-level Sidebar.
-const WORKSPACE_TABS = [
-  { id: "overview", label: "Overview" },
-  { id: "processes", label: "Processes" },
-  { id: "captures", label: "Captures" },
-  { id: "documentation", label: "Documentation" },
-] as const;
+type WorkspaceTabId = "overview" | "processes" | "captures" | "documentation";
 
-const AVAILABLE_TAB = "overview";
+// The workspace's navigation structure for what a project contains.
+// "overview" and "processes" (TASK-007) have real content; "captures" and
+// "documentation" are reserved, genuinely disabled (not fake-clickable)
+// entries — see docs/architecture.md for how this maps onto real routes
+// later, the same mechanical swap already documented for the top-level
+// Sidebar.
+const WORKSPACE_TABS: { id: WorkspaceTabId; label: string; available: boolean }[] = [
+  { id: "overview", label: "Overview", available: true },
+  { id: "processes", label: "Processes", available: true },
+  { id: "captures", label: "Captures", available: false },
+  { id: "documentation", label: "Documentation", available: false },
+];
 
 export function ProjectWorkspace({
   project,
@@ -35,6 +37,7 @@ export function ProjectWorkspace({
   onGone,
 }: ProjectWorkspaceProps) {
   const [editOpen, setEditOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<WorkspaceTabId>("overview");
 
   return (
     <div className="workspace">
@@ -65,9 +68,10 @@ export function ProjectWorkspace({
             key={tab.id}
             type="button"
             className="workspace-tabs__item"
-            aria-current={tab.id === AVAILABLE_TAB ? "page" : undefined}
-            disabled={tab.id !== AVAILABLE_TAB}
-            title={tab.id !== AVAILABLE_TAB ? "Not available yet" : undefined}
+            aria-current={tab.id === activeTab ? "page" : undefined}
+            disabled={!tab.available}
+            title={!tab.available ? "Not available yet" : undefined}
+            onClick={() => setActiveTab(tab.id)}
           >
             {tab.label}
           </button>
@@ -75,7 +79,8 @@ export function ProjectWorkspace({
       </nav>
 
       <div className="workspace-content">
-        <ProjectOverview project={project} />
+        {activeTab === "overview" && <ProjectOverview project={project} />}
+        {activeTab === "processes" && <ProcessesView projectId={project.id} />}
       </div>
 
       {editOpen && (
