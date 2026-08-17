@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Secrets must never be committed (GoLive uses Windows Credential Manager,
+# not .env files, for the OpenAI API key — this is a defensive guard only)
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

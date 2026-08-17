@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { checkFoundationStatus } from "./services/foundation";
 import "./App.css";
 
 type BackendStatus =
@@ -11,7 +11,7 @@ function App() {
   const [status, setStatus] = useState<BackendStatus>({ state: "checking" });
 
   useEffect(() => {
-    invoke<string>("check_foundation_status")
+    checkFoundationStatus()
       .then((message) => setStatus({ state: "ok", message }))
       .catch((error) =>
         setStatus({ state: "error", message: String(error) }),
