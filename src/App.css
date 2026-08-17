@@ -132,7 +132,10 @@ button {
   letter-spacing: -0.01em;
 }
 
-.header__status {
+/* Status pill — a colored dot + label, reused by the header connectivity
+   indicator and the Settings page's local-storage status. */
+
+.status-pill {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -140,18 +143,18 @@ button {
   color: var(--color-text-secondary);
 }
 
-.header__status-dot {
+.status-pill__dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background-color: var(--color-text-secondary);
 }
 
-.header__status--ok .header__status-dot {
+.status-pill--ok .status-pill__dot {
   background-color: var(--color-success);
 }
 
-.header__status--error .header__status-dot {
+.status-pill--error .status-pill__dot {
   background-color: var(--color-danger);
 }
 
@@ -175,6 +178,23 @@ button {
   margin: 0;
   color: var(--color-text-secondary);
   font-size: 0.9rem;
+}
+
+/* Settings page */
+
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.system-status__title {
+  margin: 0 0 var(--space-3);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
 }
 
 /* Buttons */

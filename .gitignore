@@ -18,6 +18,16 @@ dist-ssr
 .env.*
 !.env.example
 
+# The real GoLive database lives in the OS per-user app-data directory,
+# never in the repo — this is a defensive guard against accidentally
+# committing a local SQLite file (e.g. from ad-hoc debugging). Migration
+# *.sql files under src-tauri/migrations/ are unaffected and stay tracked.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

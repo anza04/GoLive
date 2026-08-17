@@ -15,3 +15,7 @@ that feature's code, not here.
 
 - `foundation.ts` — wraps the `check_foundation_status` proof-of-life
   command.
+- `storage.ts` — wraps `get_local_storage_status`, the SQLite
+  persistence proof-of-life command (TASK-004). No SQLite-specific
+  terminology crosses this boundary — it returns a plain
+  `{ ready, initializedAt }` shape.

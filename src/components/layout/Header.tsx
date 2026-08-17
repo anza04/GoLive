@@ -1,3 +1,5 @@
+import { StatusPill } from "../ui/StatusPill";
+
 type ConnectivityState = "checking" | "ok" | "error";
 
 interface HeaderProps {
@@ -14,20 +16,23 @@ const STATUS_LABEL: Record<ConnectivityState, string> = {
   error: "Offline",
 };
 
+const STATUS_TONE: Record<ConnectivityState, "neutral" | "ok" | "error"> = {
+  checking: "neutral",
+  ok: "ok",
+  error: "error",
+};
+
 /** Application header: shows the active area's title and a subtle,
  * user-facing (non-technical) backend connectivity indicator. */
 export function Header({ title, status, statusDetail }: HeaderProps) {
   return (
     <div className="header">
       <h1 className="header__title">{title}</h1>
-      <div
-        className={`header__status header__status--${status}`}
-        role="status"
-        title={statusDetail}
-      >
-        <span className="header__status-dot" aria-hidden="true" />
-        <span>{STATUS_LABEL[status]}</span>
-      </div>
+      <StatusPill
+        tone={STATUS_TONE[status]}
+        label={STATUS_LABEL[status]}
+        detail={statusDetail}
+      />
     </div>
   );
 }

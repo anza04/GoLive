@@ -81,29 +81,43 @@ wrapper. `stores/` and `utils/` remain empty — nothing needs them yet.
 
 ## 3. Current Rust/Tauri structure
 
-**CURRENT:** `src-tauri/src` contains only `main.rs` (entry point) and
-`lib.rs` (Tauri builder + the single `check_foundation_status` command).
-That's an accurate reflection of the actual functionality: one command with
-no branching, no fallible operations, no persistence. Adding empty
-`commands/`, `services/`, `repositories/`, `models/`, `errors/` modules now
-would be structure with nothing to hold.
+**CURRENT:**
 
-**FUTURE — where new Rust code belongs, as it's introduced:**
+```
+src-tauri/
+  migrations/
+    0001_initial.sql        infrastructure-only migration (see §17)
+  src/
+    main.rs                 entry point
+    lib.rs                  Tauri builder, .setup() hook, command registration
+    errors.rs                AppError (see §10)
+    commands/
+      foundation.rs           check_foundation_status
+      storage.rs               get_local_storage_status
+    db/
+      mod.rs                   DbService: init, pool access
+      pool.rs                  r2d2 pool construction + PRAGMAs
+      migrations.rs            migration runner
+    repositories/
+      storage_status.rs        StorageStatusRepository trait +
+                                SqliteStorageStatusRepository
+```
 
-- **`commands/`** — Tauri-facing functions (`#[tauri::command]`). Thin:
-  parse/validate the call, delegate to a service, map the result/error back
-  to the frontend. No business logic here.
+`commands/`, `db/`, and `repositories/` were introduced by TASK-004 — the
+first modules with enough real content to justify splitting out of
+`lib.rs`. There is still no `services/` (no business/domain logic exists
+yet — `db::DbService` is infrastructure, not domain logic) and no
+`models/` (no domain structs like `Project` exist yet). Both are
+introduced when the first real business logic/domain model needs them
+(expected TASK-005).
+
+**FUTURE:**
+
 - **`services/`** — Application/business logic. Pure Rust, independently
-  testable, no direct knowledge of Tauri's `invoke` plumbing.
-- **`repositories/`** — Persistence abstractions (see §6). The future
-  SQLite implementation lives behind this boundary.
+  testable, no direct knowledge of Tauri's `invoke` plumbing or of
+  `repositories/` beyond the trait it depends on.
 - **`models/`** — Domain/data structures shared across backend logic
   (`Project`, `Process`, `Capture`, ...).
-- **`errors/`** — Application-level error type(s) (see §10).
-
-Introduce each module when the first real code needs it — e.g.
-`commands/` and `services/` most likely arrive together with the first
-Project command in M1, `repositories/` and `models/` with SQLite in M2.
 
 ## 4. Frontend → Tauri communication
 
@@ -116,11 +130,12 @@ frontend service function      src/services/*.ts
     ↓                          or features/<feature>/services/*.ts
 Tauri invoke()
     ↓
-Tauri command                  src-tauri/src (commands/ once it exists)
+Tauri command                  src-tauri/src/commands/*.rs
     ↓
-application service            [FUTURE]
+application service            [FUTURE — no business logic exists yet]
     ↓
-repository / native service     [FUTURE]
+repository / native service     src-tauri/src/repositories/*.rs (CURRENT
+                                 for storage; native service still FUTURE)
 ```
 
 **Rule:** React components never call `invoke()` directly. They call a
@@ -130,13 +145,20 @@ service function, which is the only place `invoke()` appears.
 - Not tied to a specific feature → `src/services/`.
 - Belongs to one feature → `features/<feature>/services/`.
 
-**Concrete example (the only one that exists today):** `App.tsx` calls
-`checkFoundationStatus()` from [`src/services/foundation.ts`](../src/services/foundation.ts),
-which calls `invoke("check_foundation_status")`, which reaches the Rust
-command in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs). No pointless
-extra layers (no application-service/repository step) were added around
-this single infallible command — those layers are introduced when a real
-service/repository exists to justify them, not before.
+**Concrete examples (both app-level, no feature exists yet):**
+- `App.tsx` calls `checkFoundationStatus()` from
+  [`src/services/foundation.ts`](../src/services/foundation.ts) →
+  `invoke("check_foundation_status")` →
+  [`commands::foundation::check_foundation_status`](../src-tauri/src/commands/foundation.rs).
+  Infallible, no persistence — no application-service/repository step was
+  added around it, since none would do anything.
+- `SettingsPage` calls `getLocalStorageStatus()` from
+  [`src/services/storage.ts`](../src/services/storage.ts) →
+  `invoke("get_local_storage_status")` →
+  [`commands::storage::get_local_storage_status`](../src-tauri/src/commands/storage.rs),
+  which goes through `SqliteStorageStatusRepository` (§17) — this one
+  *is* fallible (`Result<T, AppError>`, §10) and does reach a repository,
+  since it's the first command that genuinely needs one.
 
 ## 5. Business logic boundary
 
@@ -155,15 +177,17 @@ render/relay the result — it should not itself decide what the rule is.
 
 ## 6. Persistence boundary
 
-**FUTURE.** The MVP will use SQLite, but it is **not** introduced by this
-task.
+**CURRENT (infrastructure only, established TASK-004).** SQLite
+persistence infrastructure exists — connection pool, migrations, one
+repository — but no domain data (Project, Process, Capture, ...) yet.
+See §17 for the full detail.
 
 ```
-Application/domain logic (Rust)
+Application/domain logic (Rust)     [domain logic itself: FUTURE, TASK-005+]
         ↓
-Repository interface (Rust trait)
+Repository interface (Rust trait)   CURRENT — StorageStatusRepository
         ↓
-SQLite implementation
+SQLite implementation               CURRENT — SqliteStorageStatusRepository
 ```
 
 The frontend never knows SQLite exists — it only ever calls a Tauri
@@ -211,27 +235,44 @@ directly. Nothing under this boundary is implemented yet.
 
 ## 10. Error handling
 
-**CURRENT:** the only existing command, `check_foundation_status`, cannot
-fail — it returns an owned `String` directly, no `Result`, no panic path.
-No custom error type exists yet, and introducing one now would have nothing
-real to model.
+**CURRENT**, implemented TASK-004 (`src-tauri/src/errors.rs`), now that
+the database layer introduced the project's first genuinely fallible
+commands.
 
-**FUTURE convention**, to apply once the first fallible command is added:
-- Tauri commands that can fail return `Result<T, AppError>`, where
-  `AppError` is a small `serde::Serialize`-able error type (e.g. built with
-  `thiserror`) carrying a stable `code` and a human-readable `message`.
-- Expected failure conditions (not-found, validation, I/O failure, etc.)
-  are returned as `Err(...)`, never `panic!`/`unwrap`/`expect`. `.expect()`
-  remains acceptable only for genuinely unrecoverable startup failures,
-  exactly as `run(...).expect(...)` is used today in `lib.rs` for a fatal
-  application-bootstrap error.
-- The frontend service layer (§4) receives this structured error via the
-  rejected `invoke()` promise and turns it into a message a user can
-  understand, while keeping the technical detail (`code`, underlying
-  message) available for debugging/logs.
+- `AppError` (`thiserror`-derived) has one variant per failure category
+  the app currently has: `Storage` (app-data directory / connection
+  issues), `Database` (query/repository failures), `Migration` (schema
+  migration failures). Each carries a fixed, generic, user-safe message —
+  never a raw underlying error.
+- `AppError` implements `serde::Serialize` by hand, always producing
+  `{ "code": "...", "message": "..." }` for the frontend — the code is a
+  stable machine-readable string (e.g. `"database_error"`), the message is
+  the fixed generic text, never SQL text, file paths, or other internals.
+- `impl From<std::io::Error>`, `From<r2d2::Error>`, `From<rusqlite::Error>`
+  for `AppError` log the real underlying error to stderr (`eprintln!`,
+  prefixed `[golive]`) at the point of conversion, then return the generic
+  variant — so the detail needed to diagnose a failure stays available to
+  a developer without ever reaching the UI or the frontend.
+- Fallible Tauri commands return `Result<T, AppError>` — see
+  `commands::storage::get_local_storage_status`. No expected failure path
+  uses `panic!`/`unwrap`/`expect`; `.expect()` remains reserved for
+  genuinely unrecoverable startup failures (`run(...).expect(...)` in
+  `lib.rs`, and database initialization failing inside `.setup()`, which
+  intentionally prevents the app from starting rather than running with a
+  broken database silently — see §17).
+- The frontend service layer (§4) receives the rejected `invoke()` promise
+  and turns it into a plain-language, non-technical status (see
+  `SettingsPage`'s "Local storage: Unavailable"), keeping the structured
+  `{ code, message }` available (currently as a hover tooltip) for
+  debugging rather than showing it as primary UI text.
 
-This is documented rather than implemented now because no fallible
-operation exists yet to justify the type (see decision in DECISIONS.md).
+An `AppError::State` variant (for "invalid application state") was
+considered, per the general category this task was asked to cover, but
+deliberately not added: nothing in the current code can actually produce
+it (Tauri's own `State<T>` extractor handles a truly unmanaged state as a
+framework-level error, not one our code constructs), and an unused variant
+would just be dead code. It can be added the moment a real path to it
+exists.
 
 ## 11. State management
 
@@ -318,11 +359,18 @@ working one just to shrink the list.
 |---|---|
 | `tauri` | Desktop shell / command runtime |
 | `tauri-build` | Build-time codegen (build.rs) |
-| `serde` (derive) | (De)serialization traits — not yet used by any of our own types, but required by essentially every future Tauri command that exchanges structured data (e.g. `#[derive(Serialize, Deserialize)]` domain structs) and already a transitive dependency of `tauri` itself. Kept rather than removed: standard, low-risk, and imminently needed starting with the first typed command. |
-| `serde_json` | JSON value handling — same rationale as `serde`; will be used once structured AI responses or JSON payloads exist. |
+| `serde` (derive) | (De)serialization — now actually used: `LocalStorageStatus`, `AppError`. |
+| `serde_json` | JSON value handling — still unused directly by our code; kept for the same reason as before (near-certain need once AI/JSON payloads exist), see TASK-002 decision. |
+| `rusqlite` (`bundled`) | Embedded SQLite bindings. `bundled` statically compiles SQLite into the binary — no system SQLite install required (see §17, DECISIONS.md). |
+| `r2d2`, `r2d2_sqlite` (`bundled`) | Connection pool for `rusqlite`, so one long-running database operation doesn't block every other one (see §17, "Concurrency"). |
+| `thiserror` | Derives `AppError`'s `Display`/`std::error::Error` impl (§10) with minimal boilerplate. |
 
-No dependency was added or removed by this task; `tauri-plugin-opener` was
-already removed in TASK-001 and is not reintroduced.
+**Dev-only:** `tempfile` — isolated temp directories for the database
+tests (§17), never touching the real per-user app-data directory.
+
+Rejected for this task: `rusqlite_migration` (evaluated, added, then
+removed — see DECISIONS.md for why) and `sqlx` (evaluated and not chosen
+— see DECISIONS.md). `tauri-plugin-opener` remains removed from TASK-001.
 
 ## 16. Application shell & navigation
 
@@ -372,10 +420,106 @@ already removed in TASK-001 and is not reintroduced.
   ("Ready" / "Connecting…" / "Offline") instead of the old standalone
   card; the raw backend message is kept only as a hover tooltip, not
   shown in the main UI, per the "no technical details in normal user
-  flow" rule.
+  flow" rule. `Header`'s status indicator was extracted into the
+  reusable `components/ui/StatusPill` in TASK-004, once `SettingsPage`
+  needed the identical dot+label pattern for local storage status.
+
+## 17. Database architecture (TASK-004)
+
+**CURRENT.** Local SQLite persistence infrastructure — no domain schema
+yet (that's TASK-005+).
+
+**Technology:** [`rusqlite`](https://docs.rs/rusqlite) (`bundled`
+feature — SQLite is compiled into the binary; the user never installs
+SQLite separately), pooled via
+[`r2d2`](https://docs.rs/r2d2)/[`r2d2_sqlite`](https://docs.rs/r2d2_sqlite).
+`sqlx` was evaluated and rejected — see DECISIONS.md.
+
+**Location:** `<app_data_dir>/database/golive.db`, where `app_data_dir`
+comes from Tauri's `app.path().app_data_dir()` (resolved once, in
+`.setup()`) — never hardcoded, never `src/`, never next to the executable.
+The `database` subdirectory is created automatically
+(`std::fs::create_dir_all`) if it doesn't exist.
+
+**Initialization** (`db::DbService::init`, called once from `lib.rs`'s
+`.setup()` hook): resolve `app_data_dir` → ensure `database/` exists →
+open/create `golive.db` → build the connection pool (applying pragmas on
+every new pooled connection, see below) → run pending migrations → return
+a `DbService` that owns the pool. Idempotent — calling it again against an
+existing database neither recreates nor destroys it (see `db::tests`). If
+any step fails, `.setup()` returns `Err`, and Tauri does not start the
+application — an initialization failure is never silently ignored.
+
+**SQLite configuration**, applied to every pooled connection on creation:
+- `foreign_keys = ON` (off by default in SQLite; needed once real tables
+  reference each other).
+- `journal_mode = WAL` — lets readers proceed while a write is in
+  progress, rather than the stricter default rollback-journal locking.
+- `busy_timeout = 5000` — a connection that finds the database briefly
+  locked waits up to 5s instead of failing immediately.
+
+**Migrations:** hand-rolled rather than a third-party crate (see
+DECISIONS.md for why) — `db::migrations::run` reads SQLite's
+`user_version` pragma, then applies, in order and each inside its own
+transaction, every file in a fixed `MIGRATIONS: &[(version, sql)]` array
+whose version is greater than the current one, bumping `user_version`
+after each. Files live in `src-tauri/migrations/` (`0001_initial.sql` today, which
+deliberately contains only an infrastructure table, no domain schema —
+see DECISIONS.md), are embedded at compile time (`include_str!`), and
+must never be edited once shipped — only appended to. Applying the same
+migrations twice is a no-op, so this runs safely on every startup.
+
+**Repository boundary:** `repositories::storage_status::StorageStatusRepository`
+(trait, one method: `ensure_marker`) +
+`SqliteStorageStatusRepository` (the only implementation). Deliberately
+not a generic `Repository<T>` — there's no real domain model yet to
+justify one; this is the concrete instantiation of the pattern §6
+describes, scoped to exactly the proof-of-persistence operation. Callers
+(Tauri commands) depend on the trait, not the SQLite type.
+
+**Connection management:** commands don't open connections or manage
+pools themselves — they receive the pool via `db::DbService`
+(Tauri-managed state, `app.manage(db_service)`), and construct a
+repository from it per call
+(`SqliteStorageStatusRepository::new(db.pool())` — cloning an `r2d2::Pool`
+is cheap, it's `Arc`-backed). No database initialization logic lives
+inside a command (see `commands::storage::get_local_storage_status`).
+
+**Error handling:** see §10. Every fallible database operation returns
+`Result<_, AppError>`; raw `rusqlite`/`r2d2`/`io` errors are logged to
+stderr and converted to a generic `AppError::Storage` /
+`AppError::Database` / `AppError::Migration` before reaching a command's
+return value — never exposed to the frontend.
+
+**Testing strategy:** all database tests (`db::tests`,
+`repositories::storage_status::tests`) use `tempfile::tempdir()` — a
+fresh, isolated directory per test, deleted automatically when the test
+ends — never the real per-user `app_data_dir`. `cargo test` covers:
+database/directory creation, `init` being safe to call repeatedly
+(simulating repeated app launches), the migrated schema being queryable,
+`ensure_marker` writing once and returning the same value on repeated
+calls, and — the most important one —
+`marker_survives_reopening_the_database`, which drops the `DbService`
+(closing the pool, simulating closing the app) and re-initializes a new
+one against the same directory (simulating relaunching it), asserting the
+marker read back matches what was written. This was additionally verified
+manually against the real per-user `app_data_dir` (see PROJECT_STATE.md).
+
+**Proof-of-persistence:** `get_local_storage_status` (command) →
+`SqliteStorageStatusRepository::ensure_marker` — writes a fixed marker key
+to `app_metadata` exactly once (first-ever call), reads it back on every
+call after. `SettingsPage` calls this on mount and renders "Local storage:
+Ready" (no path, no SQL, no raw error) — see §4 for the full call chain.
+
+**Future cloud replacement:** unchanged principle from §6/§14 —
+`StorageStatusRepository` (and whatever repositories TASK-005+ add) is
+the seam a remote implementation would sit behind; `DbService` and
+`SqliteStorageStatusRepository` are the only things that would be
+replaced, not the commands or the frontend.
 
 ## Status
 
-Reflects the state after **TASK-003** (application shell and navigation —
-no product functionality added). See [PROJECT_STATE.md](../PROJECT_STATE.md)
-for the authoritative current implementation status.
+Reflects the state after **TASK-004** (local SQLite persistence
+infrastructure — no domain schema, no Project/Capture/Process
+functionality). See [PROJECT_STATE.md](../PROJECT_STATE.md) for the
+authoritative current implementation status.

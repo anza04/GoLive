@@ -7,7 +7,7 @@ Current milestone:
 M0 — Foundation
 
 Completed:
-TASK-001, TASK-002, TASK-003
+TASK-001, TASK-002, TASK-003, TASK-004
 
 ## Current implementation
 
@@ -44,6 +44,41 @@ TASK-001, TASK-002, TASK-003
   `src/services/foundation.ts` instead of calling `invoke()` directly
 - `.gitignore` explicitly excludes `.env`/`.env.*` as a defensive secrets
   guard
+- **Local SQLite persistence infrastructure** (`src-tauri/src/db/`,
+  `repositories/`): embedded SQLite (`rusqlite`, bundled — no separate
+  SQLite install required) via an `r2d2` connection pool, `foreign_keys` /
+  WAL / busy-timeout configured
+- **Automatic database initialization** at app startup
+  (`db::DbService::init`, called from `lib.rs`'s `.setup()` hook):
+  resolves the per-user application-data directory via Tauri's
+  `app.path().app_data_dir()` (never hardcoded), creates
+  `<app_data_dir>/database/` if needed, opens/creates `golive.db`.
+  Idempotent — safe on every launch, never recreates or destroys existing
+  data. A failure here prevents the app from starting rather than being
+  silently ignored.
+- **Versioned migrations** (`src-tauri/migrations/0001_initial.sql`,
+  applied by a small hand-rolled runner using SQLite's `user_version`
+  pragma — see DECISIONS.md for why this isn't a third-party crate).
+  Contains only a minimal `app_metadata` infrastructure table — no
+  Project/Capture/Process/Recording schema yet
+- **Repository boundary**: `StorageStatusRepository` trait +
+  `SqliteStorageStatusRepository` implementation — the concrete
+  instantiation of the persistence pattern TASK-002 documented, scoped to
+  the one proof-of-persistence operation this task needed
+- **Database error handling**: `AppError` (`src-tauri/src/errors.rs`,
+  `thiserror`-based) — `Storage` / `Database` / `Migration` variants,
+  each a fixed generic user-safe message; raw `rusqlite`/`r2d2`/`io`
+  errors are logged to stderr and never reach the frontend
+- **Persistence integration proof**: `get_local_storage_status` Tauri
+  command → `src/services/storage.ts` → `SettingsPage`, which now shows a
+  "Local storage: Ready" status (via the shared `StatusPill` component,
+  also now used by `Header`) once the storage marker is confirmed —
+  exercises the full React → service → command → repository → SQLite →
+  repository → command → React round trip without modeling any product
+  data
+- Rust module structure now includes `commands/`, `db/`, `repositories/`
+  (previously just `main.rs` + `lib.rs`); `services/` and `models/`
+  remain introduced only once real business logic/domain models exist
 
 ## Architecture conventions established (TASK-002)
 
@@ -119,9 +154,33 @@ environment (no desktop screenshot capability), so visual verification
 relied on the dev-server browser preview, which renders the identical
 React/CSS.
 
+**TASK-004 validation:** `npx tsc --noEmit`, `npm run build`, `cargo
+check`, `cargo test` (6/6 passing, in `src-tauri/`), and `npm run tauri
+build` all pass. Structural check of the new Settings "System" status
+section done via the Vite dev server browser preview (shows "Local
+storage: Unavailable" there, correctly — no Tauri IPC bridge exists in a
+plain browser tab, so the command genuinely can't succeed there; this is
+the expected error path, not a bug). The real, decisive verification was
+against the actual per-user application-data directory
+(`%APPDATA%\com.golive.app\database\golive.db`, confirmed created with
+WAL/SHM sidecar files after first launch): since no desktop UI-automation
+tool is available in this environment to click the native window's
+Settings button, the exact `DbService::init` +
+`SqliteStorageStatusRepository::ensure_marker` code path was run twice as
+separate process invocations against that real directory (via a temporary
+`cargo run --example`, deleted before commit) — both invocations returned
+the identical marker value, and `golive.exe` was then relaunched and
+confirmed to start cleanly against the now-populated real database
+(`tasklist`-verified, then terminated). This, together with the automated
+`marker_survives_reopening_the_database` test (isolated temp directory),
+constitutes the persistence-survives-restart proof required by this task.
+
 ## Not implemented yet
 
-- Database (SQLite), migrations, repositories
+- Domain database schema (Project/Capture/Process/Recording tables) —
+  the SQLite persistence *infrastructure* (connection pool, migrations,
+  repository pattern) exists as of TASK-004, but no domain tables exist
+  yet
 - Projects (create/list/edit)
 - Processes, Captures
 - Screenshots (full-screen / monitor / area)
@@ -146,4 +205,4 @@ React/CSS.
 
 ## Next task
 
-TASK-004
+TASK-005

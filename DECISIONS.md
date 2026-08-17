@@ -192,3 +192,111 @@ usable; the framework default has no minimum, so the window could
 otherwise be resized small enough to make the sidebar or content
 unreadable.
 **Consequence:** users cannot resize the GoLive window below 760×480.
+
+## TASK-004 — Local SQLite data layer
+
+**Decision:** `rusqlite` (with the `bundled` feature) over `sqlx`.
+**Reason:** `sqlx`'s main advantage — compile-time-checked queries — needs
+either a live database or an offline query-cache file at build time,
+adding real setup/maintenance overhead for every contributor; without
+that feature we'd just be using its runtime-checked `query()` API, the
+same thing `rusqlite` offers directly, while additionally pulling in an
+async runtime (tokio) that nothing else in the app currently needs
+(Tauri's commands don't require an async database driver — SQLite itself
+is not an async database). `rusqlite` is synchronous, mature, has a much
+smaller dependency tree, and `bundled` statically links SQLite into the
+binary so users never install SQLite separately.
+**Consequence:** database calls are synchronous Rust calls (via a pooled
+connection, see below) rather than `.await`ed; this is the simpler,
+lower-risk choice for a single-user desktop app and matches "simplest
+robust solution" over "evaluate sqlx, don't default to it" from the task
+brief.
+
+**Decision:** connection pooling via `r2d2` + `r2d2_sqlite`, not a single
+`Mutex<Connection>`.
+**Reason:** a single shared connection behind a mutex would serialize
+*every* database access — including reads — across the whole app. With
+WAL mode (see below), SQLite already allows concurrent readers alongside
+a writer; a pool lets the app actually take advantage of that once
+concurrent work (recording, AI calls) exists alongside UI-driven reads,
+without over-engineering a queue or actor system now.
+**Consequence:** `db::DbService` hands out pooled connections
+(`pool.get()`), not one shared connection; each pragma
+(`foreign_keys`/`journal_mode`/`busy_timeout`) is applied via the pool's
+`with_init` hook so every connection in the pool gets the same
+configuration.
+
+**Decision:** database location resolved via Tauri's
+`app.path().app_data_dir()` (called once in `.setup()`), storing the file
+at `<app_data_dir>/database/golive.db`. Never hardcoded.
+**Reason:** required by the task brief and by the project's "no
+hard-coded paths" principle; using Tauri's own resolver (rather than the
+`dirs` crate or a manual `%APPDATA%` lookup) keeps the path correct for
+the app's actual identifier and consistent with how Tauri itself resolves
+paths for other purposes, without adding another crate that does the same
+job.
+**Consequence:** `db::DbService::init` takes a plain `&Path` rather than
+resolving the directory itself, so it has zero Tauri dependency and is
+fully unit-testable with `tempfile::tempdir()` — the Tauri-specific
+resolution happens once, in `lib.rs`, and everything downstream is plain
+Rust.
+
+**Decision:** hand-rolled migrations (`PRAGMA user_version` + a fixed
+`&[(version, sql)]` array), not the `rusqlite_migration` crate.
+**Reason:** `rusqlite_migration` was evaluated and initially added, but
+its latest version requires Rust 1.95 (this project's toolchain is
+1.92.0), and the last version compatible with 1.92.0
+(`rusqlite_migration@2.5.0`) depends on an older `rusqlite`/
+`libsqlite3-sys` than the version already resolved for `r2d2_sqlite`,
+which Cargo refuses to combine (two versions of a native library that
+both `links = "sqlite3"` cannot coexist in one dependency graph). Rather
+than downgrade `rusqlite`/`r2d2_sqlite` to work around a third-party
+crate's transitive pin, the mechanism itself is small enough (SQLite's
+own `user_version` pragma plus a version-ordered file list) to implement
+directly in ~40 lines, with no dependency at all.
+**Consequence:** one fewer dependency; migrations are still versioned,
+source-controlled, applied automatically and in order, each inside its
+own transaction, and safe to run repeatedly (only files newer than the
+stored `user_version` execute). Revisit if a future task's migration
+needs (e.g. down-migrations, checksums) outgrow this.
+
+**Decision:** repository boundary is one trait
+(`StorageStatusRepository`) with one method (`ensure_marker`) and one
+implementation (`SqliteStorageStatusRepository`) — not a generic
+`Repository<T>`.
+**Reason:** explicitly required by the task brief, and consistent with
+the project's standing rule against speculative abstraction: there is no
+real domain model yet, so a generic repository would have nothing
+concrete to be generic over.
+**Consequence:** this is the reference shape for TASK-005's real
+repositories (e.g. a future `ProjectRepository`), not a base class or
+interface they need to extend.
+
+**Decision:** implemented `AppError` (`thiserror`-derived, hand-written
+`Serialize`) now, with `Storage` / `Database` / `Migration` variants only
+— no `State` variant despite being one of the four categories the task
+brief listed.
+**Reason:** TASK-002 deferred a custom error type until a genuinely
+fallible operation existed to justify it; the database layer is that
+operation. A `State` variant was drafted but removed after `cargo check`
+flagged it as dead code — nothing in the current codebase can actually
+produce it (Tauri's `State<T>` extractor surfaces a missing/unmanaged
+state as its own framework-level error, not one our code constructs), so
+keeping an unused variant "for later" would repeat exactly the kind of
+speculative code this project has consistently avoided.
+**Consequence:** raw `rusqlite`/`r2d2`/`io::Error`s are converted at the
+boundary (`impl From<...> for AppError`), logged to stderr for debugging,
+and never reach the frontend as anything other than a fixed, generic
+`{ code, message }`. Add `AppError::State` (or any other variant) the
+moment a real code path needs it, not before.
+
+**Decision:** all database tests use `tempfile::tempdir()`, never the
+real per-user `app_data_dir`.
+**Reason:** required by the task brief; also the only way to test
+`init_is_idempotent_across_repeated_startups` and
+`marker_survives_reopening_the_database` deterministically and
+repeatably without depending on or mutating whatever happens to already
+exist on the developer's machine.
+**Consequence:** `cargo test` is always safe to run — it never touches
+`%APPDATA%\com.golive.app`, and each test gets its own directory that's
+deleted automatically when the test ends.

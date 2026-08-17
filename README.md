@@ -12,11 +12,15 @@ functional specification.
 
 **Milestone M0 — Foundation.** The application has its initial desktop
 shell: a sidebar (Projects / Settings), a header with a live backend
-connectivity indicator, and placeholder Projects/Settings pages. No product
-functionality (projects, captures, recording, AI, etc.) has been implemented
-yet — the pages are empty states with no data or persistence. See
-[PROJECT_STATE.md](PROJECT_STATE.md) for the authoritative current state
-and [TASK_INDEX.md](TASK_INDEX.md) for what's planned next.
+connectivity indicator, and placeholder Projects/Settings pages. It also
+now has local SQLite persistence infrastructure — an embedded database,
+versioned migrations, and a repository boundary — used so far only to
+prove the storage layer itself works (the Settings page's "Local storage:
+Ready" indicator). No product functionality (projects, captures,
+recording, AI, etc.) has been implemented yet — the pages are still empty
+states with no real data. See [PROJECT_STATE.md](PROJECT_STATE.md) for the
+authoritative current state and [TASK_INDEX.md](TASK_INDEX.md) for what's
+planned next.
 
 ## Development prerequisites
 
@@ -63,9 +67,14 @@ src/            React + TypeScript frontend
   types/        shared TypeScript domain types
   utils/        small pure helpers
 src-tauri/      Rust backend and Tauri configuration
+  migrations/   versioned SQLite schema migrations
 docs/           architecture and design documentation
 tests/          automated test suite
 ```
+
+Rust-side tests (database, repositories) run with `cargo test` from
+`src-tauri/`; see [docs/architecture.md](docs/architecture.md) §17 for the
+database architecture.
 
 See [docs/architecture.md](docs/architecture.md) for the layering principles
 and [DECISIONS.md](DECISIONS.md) for why key technologies were chosen.

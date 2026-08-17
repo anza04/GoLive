@@ -1,15 +1,26 @@
-/// Minimal proof-of-life command used by the frontend to confirm that the
-/// React -> Tauri -> Rust pipeline is wired correctly. Carries no business
-/// logic; it will be superseded by real commands in later tasks.
-#[tauri::command]
-fn check_foundation_status() -> String {
-    "Rust backend connected.".to_string()
-}
+mod commands;
+mod db;
+mod errors;
+mod repositories;
+
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![check_foundation_status])
+        .setup(|app| {
+            let data_dir = app.path().app_data_dir().map_err(|err| {
+                eprintln!("[golive] failed to resolve app data directory: {err}");
+                err
+            })?;
+            let db_service = db::DbService::init(&data_dir)?;
+            app.manage(db_service);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::foundation::check_foundation_status,
+            commands::storage::get_local_storage_status,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
