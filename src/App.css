@@ -1,0 +1,111 @@
+:root {
+  font-family:
+    "Segoe UI",
+    Inter,
+    -apple-system,
+    Avenir,
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color: #1b1b1f;
+  background-color: #f3f3f5;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem;
+}
+
+.card {
+  width: 100%;
+  max-width: 420px;
+  padding: 2.5rem;
+  border-radius: 12px;
+  background-color: #ffffff;
+  border: 1px solid #e1e1e6;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  text-align: center;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.tagline {
+  margin: 0 0 1.5rem;
+  color: #57575e;
+  font-size: 0.95rem;
+}
+
+.status {
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  background-color: #f3f3f5;
+  color: #57575e;
+}
+
+.status-ok {
+  background-color: #e6f4ea;
+  color: #1e7b34;
+}
+
+.status-error {
+  background-color: #fdecea;
+  color: #b3261e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #f0f0f2;
+    background-color: #202023;
+  }
+
+  .card {
+    background-color: #2a2a2e;
+    border-color: #3a3a3f;
+  }
+
+  .tagline {
+    color: #b5b5bc;
+  }
+
+  .status {
+    background-color: #323236;
+    color: #b5b5bc;
+  }
+
+  .status-ok {
+    background-color: #1c3324;
+    color: #7cd992;
+  }
+
+  .status-error {
+    background-color: #3a2222;
+    color: #f28b82;
+  }
+}
