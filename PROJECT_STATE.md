@@ -7,7 +7,8 @@ Current milestone:
 M0 — Foundation
 
 Completed:
-TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007
+TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007,
+TASK-008
 
 ## Current implementation
 
@@ -135,6 +136,64 @@ TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007
     shared `components/ui/Dialog`
   - `ProjectOverview`'s reserved-sections list dropped "Processes" — no
     longer a placeholder
+- **Capture domain (TASK-008)** — GoLive's third real domain entity,
+  related 1:N to Process (`Project 1 ─── N Process 1 ─── N Capture`),
+  nested inside a selected Process rather than a new Workspace tab.
+  Metadata only — no screenshot/recording/media file is captured or
+  stored by this task:
+  - Domain model `Capture { id, process_id, type, title, description,
+    created_at, updated_at }` (`src-tauri/src/models/capture.rs`);
+    `type` is a real `CaptureType` Rust enum (`Screenshot` / `Recording` /
+    `Note`) implementing `rusqlite`'s `ToSql`/`FromSql` directly and
+    serializing as one of three stable lowercase strings — the same
+    representation in SQLite, the Rust wire format, and the frontend
+    `CaptureType` TypeScript union (same pattern as `ProcessStatus`)
+  - `captures` SQLite table (`src-tauri/migrations/0004_captures.sql`,
+    additive — `0001`–`0003` untouched):
+    `process_id TEXT NOT NULL REFERENCES processes(id) ON DELETE CASCADE`,
+    indexed on `process_id` and `(process_id, updated_at DESC)`.
+    **Deleting a Process cascades to delete its Captures at the database
+    level**, and because `processes.project_id` already cascades from
+    `projects`, deleting a Project transitively cascades through two
+    chained foreign keys — Project → Process → Capture — with no
+    application-side cascade loop, proven by automated tests
+  - `CaptureRepository` trait + `SqliteCaptureRepository`
+    (`src-tauri/src/repositories/capture.rs`): create/list_by_process
+    (scoped to one process, `updated_at DESC`)/get/update/delete — same
+    shape as `ProcessRepository`; `update`'s SQL never touches `id`,
+    `process_id`, or `created_at`
+  - `CaptureService` (`src-tauri/src/services/capture.rs`) holds *both*
+    `CaptureRepository` and `ProcessRepository`: `create` confirms the
+    parent process exists (clean `NotFound` instead of relying solely on
+    the foreign key) before writing. `title` (required, ≤200 chars) and
+    `description` (optional, ≤5000 chars) use the same trim/validate
+    rules as elsewhere; `type` is parsed via `CaptureType::parse`,
+    rejecting anything else with `AppError::Validation`
+  - Tauri commands `create_capture` / `list_captures` / `get_capture` /
+    `update_capture` / `delete_capture`
+    (`src-tauri/src/commands/capture.rs`) — thin, delegate to
+    `CaptureService`. `list_captures` takes an explicit
+    `ListCapturesInput { process_id }` and `update_capture` an explicit
+    `UpdateCaptureInput { id, capture_type, title, description }` — no
+    `process_id`/`created_at`/`updated_at` field for a request to occupy
+  - No new `AppError` variants needed — reuses `Validation`/`NotFound`
+  - Frontend service `src/features/projects/services/captures.ts` —
+    typed `createCapture`/`listCaptures`/`getCapture`/`updateCapture`/
+    `deleteCapture`
+  - `ProcessDetail`'s old "Captures" *reserved* informational card is
+    gone — replaced by the real `CapturesSection` component (list +
+    detail pane, its own loading/error/empty states, "+ New capture"
+    entry point), rendered directly inside `ProcessDetail`. Deliberately
+    not a second nested Workspace — one level deeper than `ProcessesView`,
+    same list+detail shape, scoped to the selected process
+  - `CaptureList` (title, `CaptureTypeBadge`, updated date), `CaptureDetail`
+    (title, description, type, dates, Edit/Delete), `CaptureTypeBadge`
+    (`Screenshot`/`Recording`/`Note`), `CreateCaptureDialog` (Type
+    defaults to Screenshot), `EditCaptureDialog` (pre-filled),
+    `DeleteCaptureDialog` — all reuse the shared `components/ui/Dialog`
+  - The Project Workspace's own "Captures" tab stays genuinely `disabled`
+    — Captures belong to a Process, not directly to a Project; no
+    project-wide capture list was added
 - Settings placeholder page — empty state, no other settings implemented
 - Reusable application layout components (`AppShell`, `Sidebar`, `Header`
   in `src/components/layout/`) and one reused generic UI component
@@ -443,9 +502,65 @@ explicit instruction, this is reported as an observation only, and no
 speculative infrastructure changes were made because of either this or
 TASK-005's earlier finding.
 
+**TASK-008 validation:** `npx tsc --noEmit`, `npm run build`, `cargo
+check` (no warnings), `cargo test` (95/95 passing — 63 pre-existing + 32
+new: 12 repository tests covering create/list-by-process/scoping/
+ordering/get/update incl. id-process_id-created_at immutability/delete/
+not-found variants/reopen-persistence/cascade-delete-from-process/
+cascade-delete-through-process-from-project, plus 3 new `db` tests
+confirming the `captures` table, its indexes, and its foreign key exist
+after migration and one confirming the schema reaches `user_version = 4`,
+and 16 service tests covering create incl. trimming/all four
+validation-rejection cases/all three valid capture types/invalid capture
+type/missing process, update incl. type change/invalid-type rejection/
+timestamp regeneration+preservation, and delete), and `npm run tauri
+build` all pass.
+
+Full UI-flow verification (Projects → open project → Processes tab →
+create process → select → Captures section shows the empty state → create
+capture (Type defaults to Screenshot) → appears, auto-selected → detail
+shows title/description/type/dates → Edit: values pre-filled → Cancel
+discards (verified against both UI and mock backend state) → Edit again,
+change title/type/description → Save persists, badge/dates update
+immediately, capture stays first in the list → create a second capture,
+confirm `updated_at DESC` ordering → Delete requires confirmation →
+Cancel leaves the capture in place (verified against mock state) →
+Delete again removes it and clears selection → delete the last capture →
+empty state returns) was verified against the Vite dev server with the
+same mocked-`window.__TAURI_INTERNALS__.invoke` approach as
+TASK-005/006/007, extended to cover all five Capture commands (with the
+mock strictly validating the `{ input: { process_id, capture_type, title,
+description } }` / `{ input: { id, capture_type, title, description } }`
+shapes the frontend service sends, and rejecting an `update_capture`
+input that carries `process_id`/`created_at`/`updated_at`). Additional
+checks against the mocked backend directly: an empty-title submit is
+blocked client-side by HTML5 `required` before any `invoke()` call is
+made; an over-length title/description and an invalid capture type are
+all rejected with `AppError::Validation`; creating a capture against a
+nonexistent process is rejected with `AppError::NotFound`; deleting a
+Process cascades to remove its Captures; deleting a Project cascades
+through its Processes to their Captures (confirmed via
+`window.__mockProjects`/`__mockProcesses`/`__mockCaptures`); the Project
+Workspace's "Captures" tab is still genuinely `disabled` (confirmed via
+`element.disabled === true`); Settings continues to work. The native
+`golive.exe` was built and launched separately and confirmed running via
+`tasklist` (killed after verification) against the real, schema-upgraded
+(`user_version = 4`) database.
+
+**Real-`AppData` spot-check:** unlike TASK-005/006/007, no separate
+multi-process real-`AppData` exercise was performed for the Capture
+domain specifically — it wasn't required by this task's instructions, and
+the automated `capture_survives_reopening_the_database` and
+cascade-delete tests already exercise the identical `DbService`/
+repository code path against a real (temp-directory) SQLite file across
+separate `DbService` instances. The compiled binary was confirmed to
+start and keep running cleanly against the real, migrated per-user
+`%APPDATA%\com.golive.app\` database.
+
 ## Not implemented yet
 
-- Captures
+- Capture media (the Capture domain, TASK-008, is metadata only — no
+  actual screenshot/recording file is captured, stored, or attached yet)
 - Screenshots (full-screen / monitor / area)
 - Screen recording, microphone recording
 - Floating widget, global hotkeys
@@ -468,4 +583,4 @@ TASK-005's earlier finding.
 
 ## Next task
 
-TASK-008
+TASK-009

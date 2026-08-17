@@ -32,6 +32,11 @@ pub fn run() {
             commands::process::get_process,
             commands::process::update_process,
             commands::process::delete_process,
+            commands::capture::create_capture,
+            commands::capture::list_captures,
+            commands::capture::get_capture,
+            commands::capture::update_capture,
+            commands::capture::delete_capture,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

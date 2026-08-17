@@ -129,4 +129,58 @@ mod tests {
             .expect("processes should declare a foreign key");
         assert_eq!(fk_target, "projects");
     }
+
+    #[test]
+    fn captures_table_and_indexes_exist_after_migrations() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = DbService::init(dir.path()).expect("db init should succeed");
+        let conn = db.pool().get().expect("pooled connection");
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'captures'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("querying sqlite_master should succeed");
+        assert_eq!(table_count, 1, "captures table should exist after migrations");
+
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'captures'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("querying sqlite_master should succeed");
+        assert!(
+            index_count >= 2,
+            "expected at least the process_id and process_id+updated_at indexes"
+        );
+    }
+
+    #[test]
+    fn captures_foreign_key_to_processes_is_declared() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = DbService::init(dir.path()).expect("db init should succeed");
+        let conn = db.pool().get().expect("pooled connection");
+
+        let fk_target: String = conn
+            .query_row("SELECT \"table\" FROM pragma_foreign_key_list('captures')", [], |row| {
+                row.get(0)
+            })
+            .expect("captures should declare a foreign key");
+        assert_eq!(fk_target, "processes");
+    }
+
+    #[test]
+    fn migrations_reach_the_expected_user_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = DbService::init(dir.path()).expect("db init should succeed");
+        let conn = db.pool().get().expect("pooled connection");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("reading user_version should succeed");
+        assert_eq!(version, 4, "schema should be at the latest migration (0004_captures.sql)");
+    }
 }

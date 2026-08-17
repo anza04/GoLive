@@ -2,6 +2,7 @@ import { useState } from "react";
 import { formatDate } from "../../../utils/formatDate";
 import { ProcessStatusBadge } from "./ProcessStatusBadge";
 import { EditProcessDialog } from "./EditProcessDialog";
+import { CapturesSection } from "./CapturesSection";
 import type { Process } from "../services/processes";
 
 interface ProcessDetailProps {
@@ -14,13 +15,10 @@ interface ProcessDetailProps {
 }
 
 // Informational-only preview of what a process will eventually own
-// (TASK-008+: captures, recordings, transcripts, AI analysis). No
-// clickable/functional-looking controls.
+// (TASK-009+: recordings, transcripts, AI analysis). No
+// clickable/functional-looking controls. "Captures" used to be here too —
+// TASK-008 replaced it with the real `CapturesSection` below.
 const RESERVED_SECTIONS = [
-  {
-    title: "Captures",
-    description: "Screenshots and recordings collected while documenting this process.",
-  },
   { title: "AI analysis", description: "AI-assisted process analysis will be available here." },
 ] as const;
 
@@ -51,6 +49,8 @@ export function ProcessDetail({ process, onUpdated, onDeleteRequested, onGone }:
         <span>Created {formatDate(process.createdAt)}</span>
         <span>Last updated {formatDate(process.updatedAt)}</span>
       </div>
+
+      <CapturesSection processId={process.id} />
 
       <div className="reserved-sections">
         {RESERVED_SECTIONS.map((section) => (

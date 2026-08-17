@@ -1,16 +1,42 @@
 /* Design tokens — the small, shared vocabulary the shell's CSS is built
  * from. Not a full design system: just enough to keep colors, spacing,
- * radius, and typography consistent as more UI is added. */
+ * radius, shadow, and typography consistent as more UI is added.
+ *
+ * Palette: a single indigo/violet accent (plus its two-stop gradient),
+ * carried consistently across buttons, active nav/tab states, badges, and
+ * focus rings — the one recurring color the rest of the neutral palette
+ * is built to set off. No external fonts/icons are loaded (system font
+ * stack only), keeping the app fully self-contained. */
 :root {
-  --color-bg: #f3f3f5;
+  --color-bg: #f1f2f8;
   --color-surface: #ffffff;
-  --color-border: #e1e1e6;
-  --color-text: #1b1b1f;
-  --color-text-secondary: #57575e;
-  --color-accent: #106ebe;
-  --color-accent-soft: #e5f1fa;
-  --color-success: #1e7b34;
-  --color-danger: #b3261e;
+  --color-surface-alt: #f7f7fc;
+  --color-border: #e3e4ef;
+  --color-text: #14151f;
+  --color-text-secondary: #63667a;
+  --color-text-faint: #9497a8;
+
+  --color-accent: #5b52f0;
+  --color-accent-strong: #4740d6;
+  --color-accent-soft: #ecebfe;
+  --color-accent-rgb: 91, 82, 240;
+  --gradient-accent: linear-gradient(135deg, #6d5bf0 0%, #4b8bf5 100%);
+
+  --color-success: #17915a;
+  --color-success-soft: #e4f7ee;
+  --color-danger: #d6335a;
+  --color-danger-soft: #fdecf0;
+  --color-danger-rgb: 214, 51, 90;
+
+  /* A fixed, always-dark navigation rail — a deliberate brand anchor that
+   * doesn't flip with light/dark mode, the way many product sidebars
+   * (Notion, Linear, Vercel) stay dark regardless of the content theme. */
+  --color-rail-from: #171334;
+  --color-rail-to: #241b4d;
+  --color-rail-text: rgba(255, 255, 255, 0.66);
+  --color-rail-text-active: #ffffff;
+  --color-rail-active-bg: rgba(255, 255, 255, 0.1);
+  --color-rail-border: rgba(255, 255, 255, 0.08);
 
   --space-1: 4px;
   --space-2: 8px;
@@ -19,8 +45,20 @@
   --space-5: 24px;
   --space-6: 32px;
 
-  --radius-sm: 6px;
-  --radius-md: 10px;
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-pill: 999px;
+
+  --shadow-xs: 0 1px 2px rgba(20, 21, 40, 0.05);
+  --shadow-sm: 0 2px 6px rgba(20, 21, 40, 0.06), 0 1px 2px rgba(20, 21, 40, 0.05);
+  --shadow-md: 0 8px 20px rgba(20, 21, 40, 0.08), 0 2px 6px rgba(20, 21, 40, 0.05);
+  --shadow-lg: 0 20px 45px rgba(20, 21, 40, 0.16), 0 6px 16px rgba(20, 21, 40, 0.08);
+  --shadow-accent: 0 8px 20px rgba(var(--color-accent-rgb), 0.28);
+
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 0.14s;
+  --duration-base: 0.22s;
 
   --font-sans:
     "Segoe UI", Inter, -apple-system, Avenir, Helvetica, Arial, sans-serif;
@@ -28,14 +66,34 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-bg: #202023;
-    --color-surface: #2a2a2e;
-    --color-border: #3a3a3f;
-    --color-text: #f0f0f2;
-    --color-text-secondary: #b5b5bc;
-    --color-accent: #4db8ff;
-    --color-accent-soft: #1c3a4d;
-    --color-success: #7cd992;
-    --color-danger: #f28b82;
+    --color-bg: #131420;
+    --color-surface: #1b1c2b;
+    --color-surface-alt: #202132;
+    --color-border: #2f3145;
+    --color-text: #f2f2f7;
+    --color-text-secondary: #a4a7bd;
+    --color-text-faint: #71738c;
+
+    --color-accent: #8b81ff;
+    --color-accent-strong: #a79dff;
+    --color-accent-soft: #2a2760;
+    --color-accent-rgb: 139, 129, 255;
+    --gradient-accent: linear-gradient(135deg, #8b7bff 0%, #5aa5ff 100%);
+
+    --color-success: #3ddc93;
+    --color-success-soft: #163829;
+    --color-danger: #ff7a95;
+    --color-danger-soft: #3a1826;
+    --color-danger-rgb: 255, 122, 149;
+
+    --color-rail-from: #0c0b1c;
+    --color-rail-to: #171233;
+    --color-rail-border: rgba(255, 255, 255, 0.07);
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.32);
+    --shadow-md: 0 10px 24px rgba(0, 0, 0, 0.38);
+    --shadow-lg: 0 24px 48px rgba(0, 0, 0, 0.5);
+    --shadow-accent: 0 8px 22px rgba(var(--color-accent-rgb), 0.35);
   }
 }

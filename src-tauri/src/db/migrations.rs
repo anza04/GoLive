@@ -28,6 +28,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_initial.sql")),
     (2, include_str!("../../migrations/0002_projects.sql")),
     (3, include_str!("../../migrations/0003_processes.sql")),
+    (4, include_str!("../../migrations/0004_captures.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<(), AppError> {

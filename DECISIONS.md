@@ -621,3 +621,71 @@ depend only on mechanisms already proven correct by
 parameter; `list_processes` now has the same "wrap it in a struct" shape
 as `create_process`/`update_process`, for consistency and to close a
 real verification gap, not for its own sake.
+
+## TASK-008 — Capture domain
+
+**Decision:** `Capture` has no direct `project_id` — only `process_id`,
+with `Project` reached transitively through `Process`. Deleting a Process
+cascades to delete its Captures via a plain SQL foreign key
+(`process_id ... REFERENCES processes(id) ON DELETE CASCADE`), and
+deleting a Project cascades to Captures only as a side effect of two
+chained foreign keys (`processes.project_id` → `projects`, then
+`captures.process_id` → `processes`) — no `Capture.project_id` shortcut
+column, and no application-side loop at either level.
+**Reason:** required by the task brief's stated hierarchy ("Project 1 ───
+N Process 1 ─── N Capture") and its explicit "Do not implement
+application-side cascade loops" instruction. A denormalized
+`Capture.project_id` would need to be kept in sync with the parent
+Process's project (impossible to change today, but a needless invariant
+to maintain the moment Processes can be reassigned) for a query
+(project-wide captures) this task explicitly does not implement yet
+(§13: "Do NOT create a project-wide capture list yet").
+**Consequence:** `repositories::capture::tests::
+deleting_a_project_cascades_through_processes_to_captures` proves the
+transitive cascade end-to-end; `CaptureRepository`/`CaptureService` have
+zero knowledge of Project at all, only Process — the same "each layer
+only knows its direct parent" shape as `ProcessRepository`/
+`ProcessService` not knowing about Project's siblings.
+
+**Decision:** `Capture`'s Rust field is named `capture_type` (`type` is a
+reserved word), with `#[serde(rename = "type")]` on the *model* so the
+wire shape is `{ ..., "type": "screenshot", ... }` — matching the task's
+documented `Capture { ..., type, ... }` shape and the frontend's
+`Capture.type`. The Tauri command *input* structs
+(`CreateCaptureInput`/`UpdateCaptureInput`), however, use the literal
+field name `capture_type` with no rename, so their wire shape is
+`{ ..., "capture_type": "screenshot", ... }` — exactly matching the task
+brief's own explicit spec for those two structs.
+**Reason:** the task brief specified the model's field as `type` but the
+input structs' field as `capture_type` verbatim — not an oversight to
+reconcile, but the two structs serving different purposes: the model is
+what the frontend reads and needs to look like `Capture.type`; the input
+structs are what the frontend writes, and Rust cannot name a plain field
+`type` without raw-identifier syntax (`r#type`), which the brief's chosen
+name `capture_type` sidesteps entirely for exactly the structs where it's
+spelled out.
+**Consequence:** `create_capture`/`update_capture` (Rust) and
+`createCapture`/`updateCapture` (TypeScript) all use `captureType`/
+`capture_type` consistently for writes; only the read path (`Capture`/
+`get_capture`/`list_captures`) uses `type`. This asymmetry is deliberate
+and documented here rather than "fixed" into one uniform name, since
+uniforming it would contradict the task's own literal struct
+definitions.
+
+**Decision:** capture type validation happens in `CaptureService` against
+a plain `&str` (`CaptureType::parse`, returning `AppError::Validation`
+for anything unrecognized) — the Tauri command input structs
+(`CreateCaptureInput.capture_type`, `UpdateCaptureInput.capture_type`)
+are typed `String`, not `CaptureType`, even though `CaptureType`
+implements `Deserialize`.
+**Reason:** matches the existing `ProcessStatus` convention exactly
+(`UpdateProcessInput.status: String`, TASK-007) — deserializing straight
+into the enum would reject an invalid value with a generic Tauri
+IPC-deserialization error, bypassing `AppError` entirely and violating
+the task brief's explicit requirement that invalid capture types "reject
+... through AppError::Validation."
+**Consequence:** the same three tests this task added for it
+(`create_rejects_invalid_capture_type`, `update_rejects_invalid_capture_type`,
+plus the missing-process case) prove the rejection path returns a
+structured, safe `AppError::Validation` message, not a raw deserialization
+failure the frontend's `getErrorMessage()` can't handle.
