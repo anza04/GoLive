@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type CaptureType = "screenshot" | "recording" | "note";
 
@@ -141,4 +142,32 @@ export async function updateCapture(input: UpdateCaptureInput): Promise<Capture>
 
 export async function deleteCapture(id: string): Promise<void> {
   await invoke("delete_capture", { id });
+}
+
+/**
+ * The outcome of a screenshot capture triggered *outside* any dialog's
+ * own submit flow — i.e. the global hotkey (TASK-011), which has no
+ * requesting window/button to report failure through directly. Mirrors
+ * the Rust `hotkey::CaptureResult` tagged enum exactly (`status` tag);
+ * see `hotkey.rs`'s own serialization test for the wire shape this
+ * relies on.
+ */
+export type ScreenshotCaptureResult =
+  | { status: "ok" }
+  | { status: "error"; message: string }
+  | { status: "no_active_process" };
+
+const SCREENSHOT_CAPTURED_EVENT = "screenshot-captured";
+
+/** Subscribes to hotkey-triggered screenshot-capture results (see
+ * `hotkey.rs`). Returns the unlisten function — callers must call it on
+ * unmount. Only the floating widget listens for this today; the main
+ * window's own Create Capture dialog already gets its result as a
+ * normal `createScreenshotCapture` return value/thrown error. */
+export async function onScreenshotCaptured(
+  callback: (result: ScreenshotCaptureResult) => void,
+): Promise<UnlistenFn> {
+  return listen<ScreenshotCaptureResult>(SCREENSHOT_CAPTURED_EVENT, (event) => {
+    callback(event.payload);
+  });
 }

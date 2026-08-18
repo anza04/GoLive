@@ -12,11 +12,26 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "GoLive",
         "width": 900,
         "height": 640,
         "minWidth": 760,
         "minHeight": 480
+      },
+      {
+        "label": "widget",
+        "title": "GoLive Capture",
+        "url": "widget.html",
+        "width": 260,
+        "height": 170,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "decorations": false,
+        "skipTaskbar": true,
+        "shadow": true,
+        "visible": true,
+        "focus": false
       }
     ],
     "security": {

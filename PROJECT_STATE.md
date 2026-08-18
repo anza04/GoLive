@@ -4,11 +4,11 @@ Project:
 GoLive
 
 Current milestone:
-M0 — Foundation
+M1 — Live Capture (see roadmap.md; M0 — Foundation completed at TASK-009)
 
 Completed:
 TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007,
-TASK-008, TASK-009
+TASK-008, TASK-009, TASK-010, TASK-011
 
 ## Current implementation
 
@@ -265,6 +265,97 @@ TASK-008, TASK-009
     (documented decision, not an oversight — see DECISIONS.md)
   - Project Workspace's "Captures" tab remains genuinely `disabled` —
     untouched by this task
+- **Background persistence, system tray, and the active-process store
+  (TASK-010)** — the first step of milestone M1 (see roadmap.md):
+  - `tray.rs` (new top-level module) + `commands/tray.rs`: builds a
+    system tray icon (Tauri's built-in `tray-icon` Cargo feature, no new
+    dependency) with a three-item menu — a disabled, informational
+    "Active: …"/"No active process" label, "Open GoLive", "Quit"
+  - `lib.rs`'s `Builder::on_window_event` intercepts `WindowEvent::
+    CloseRequested` and hides the window instead of closing it — GoLive
+    now keeps running with its main window hidden; the tray's "Quit" is
+    the only real exit besides a window-manager force-close. Manually
+    verified against the compiled binary: a graceful close request left
+    the same process running; force-close still works
+  - `tauri.conf.json`'s window now has an explicit `"label": "main"`
+  - `src/stores/activeProcess.tsx` — `src/stores/`'s first real
+    occupant: a plain React Context (`ActiveProcessProvider`/
+    `useActiveProcess`, mounted once in `App.tsx`), not a state
+    library, holding which Process is currently "active." Purely
+    client-side — no backend model, nothing persisted, resets on
+    every launch
+  - `src/services/activeProcess.ts`'s `syncActiveProcess` (renamed/
+    widened by TASK-011 — see below; was `services/tray.ts`'s
+    `syncActiveProcessTray`) keeps the tray in sync with the store as a
+    side effect of `setActiveProcess`/`clearActiveProcess`, so callers
+    never call the Tauri command directly
+  - `ProcessesView.tsx`: selecting, creating, or renaming-while-active a
+    Process marks/updates it as active (implicit — no separate "Set
+    active" action); deleting the active Process clears it.
+    `ProjectsView.tsx`: deleting a Project clears the active Process if
+    it belonged to that Project
+  - The underlying command (`commands::tray::set_active_process_tray` at
+    the time) was intentionally infallible (no `AppError`) — a tray-label
+    update is a cosmetic side effect the frontend never needs to react to
+    failing; native failures are logged server-side only. Still true of
+    its TASK-011 successor, `sync_active_process`
+- **Global hotkey and floating capture widget (TASK-011)** — the first
+  step that actually delivers "capture while performing your actual
+  work": a Screenshot can now be captured from anywhere in Windows, into
+  the active Process, without switching to GoLive's main window:
+  - Second Tauri window (`tauri.conf.json`, label `"widget"`,
+    `url: "widget.html"` — a second Vite/HTML entry, `vite.config.ts`'s
+    `build.rollupOptions.input`): small, always-on-top, no decorations,
+    hidden from the taskbar, visible by default. Its own React tree
+    (`src/widget/Widget.tsx`, `widget-main.tsx`, `widget.css`) — a new
+    top-level `src/widget/` folder, sibling to `features/`, not a
+    feature of the main app
+  - `active_process.rs` (new top-level module): `ActiveProcessState`, a
+    small `Mutex<Option<ActiveProcessInfo>>` — the cross-window
+    active-Process mirror. Tauri windows share no JS memory, so the
+    widget can't read the main window's `stores/activeProcess.tsx`
+    Context directly; this Rust-side state (updated by the renamed/
+    widened `sync_active_process` command, now carrying full
+    `process_id`/`project_id`, not just display names) plus an
+    `active-process-changed` event broadcast to every window
+    (`AppHandle::emit`, Rust-side — not ACL-gated) is how the widget
+    stays in sync. `get_active_process` lets a window fetch the current
+    value on mount. Never persisted — resets every launch
+  - `hotkey.rs` (new top-level module) + `tauri-plugin-global-shortcut`
+    (new dependency, Tauri's own first-party plugin, Rust-API-only — no
+    JS package added): registers `Ctrl+Alt+Shift+S` in `.setup()` and
+    handles it **entirely in Rust** — reads the active Process, builds a
+    `CaptureService` the same way `commands::capture` does, calls the
+    exact same `create_screenshot` (§22, unchanged), and emits a
+    `screenshot-captured` result event. No window's JS is involved in
+    triggering the capture this way; if there's no active Process, the
+    handler says so via the event instead of silently no-op'ing
+  - **Startup-crash bug found and fixed during this task's own manual
+    verification:** the first version propagated a shortcut-registration
+    failure with `?`, which Tauri treats as a fatal `.setup()` error —
+    when the originally-chosen shortcut turned out to already be claimed
+    by another application on the verification machine, GoLive crashed
+    on every launch. Fixed: registration failure is now logged and
+    non-fatal (the app starts normally with the hotkey simply inactive);
+    the default shortcut was also changed to a less collision-prone
+    three-modifier combination as a secondary mitigation
+  - `tray.rs` gained a fourth menu item, "Toggle Widget" (shows/hides
+    the widget window — Rust-only, no capability needed)
+  - `commands::widget::hide_widget`: the widget's own "×" button calls
+    this dedicated command rather than the raw `@tauri-apps/api/window`
+    API directly — sidesteps needing `core:window:allow-hide` (not
+    included in `core:default`) in its capability entirely, since
+    app-defined commands aren't ACL-gated
+  - New capability file `capabilities/widget.json` (scoped to the
+    `"widget"` window only): `core:default` plus
+    `core:event:allow-listen` — the one permission the widget genuinely
+    needs, to receive the events above via `@tauri-apps/api/event`'s
+    `listen()` (first use of that module; wrapped in thin service
+    functions, `onActiveProcessChanged`/`onScreenshotCaptured`, same
+    "components never call a raw Tauri API directly" rule as `invoke`)
+  - `lib.rs`'s close-to-tray handler (TASK-010) was reconsidered, not
+    changed: both "main" and "widget" hiding instead of closing is
+    correct for both, so no per-window branching was needed after all
 - Settings placeholder page — empty state, no other settings implemented
 - Reusable application layout components (`AppShell`, `Sidebar`, `Header`
   in `src/components/layout/`) and one reused generic UI component
@@ -721,6 +812,112 @@ in-memory bytes for a real, valid 1×1 PNG.
   should still do one unassisted pass through `golive.exe`'s UI per this
   task's own §33 checklist before relying on this in a real engagement.
 
+**TASK-010 validation:** `npx tsc --noEmit`, `npm run build`, `cargo
+check` (no warnings), `cargo test` (119/119 passing — 117 pre-existing +
+2 new `tray::tests`, covering `tray.rs`'s one piece of pure logic —
+tooltip/menu-label text formatting — directly, since a real tray/menu
+handle can't be constructed outside a running Tauri app), and `npm run
+tauri build` all pass.
+
+Full UI-flow verification (select a Process → tray sync call recorded
+with `{ process_name, project_name }` → select a different Process →
+re-synced → rename the active Process → re-synced with the new name →
+delete the active Process → tray call is `null` → select the remaining
+Process → delete its Project → tray call is `null` again → empty state
+returns → Settings and every existing Project/Process/Capture flow
+unaffected) was verified against the Vite dev server with the same
+mocked-`window.__TAURI_INTERNALS__.invoke` approach as every prior task,
+extended with a `set_active_process_tray` handler recording its calls
+into `window.__mockTrayCalls`.
+
+**Close-to-tray — manually verified against the compiled binary, not
+simulated:** launched `golive.exe`, confirmed running via `tasklist`,
+sent a graceful window-close request (`taskkill` without `/F`, which
+delivers a real Windows close message rather than forcefully terminating
+the process), and confirmed the *same process* (same PID) was still
+running several seconds later — proof `WindowEvent::CloseRequested` was
+intercepted and the window hidden rather than the app exiting. A
+force-close (`taskkill /F`) afterward still worked, confirming the
+documented escape hatch. What was **not** verified: actually clicking
+the tray icon's "Open GoLive"/"Quit" menu items, or its "Active: …"
+label rendering correctly — no desktop UI-automation tool is available
+in this environment to interact with the native tray directly (the same
+limitation TASK-003 through TASK-009 already recorded for the native
+window itself). Given the graceful-close proof above and that the tray
+build code compiled and ran without error (the tray icon must have been
+successfully created for the app to have stayed alive/hidden rather than
+crashed in `.setup()`), this is judged reasonable evidence the feature
+works, but a developer with an interactive desktop session should still
+click through the tray menu once before relying on it in a real
+engagement.
+
+**TASK-011 validation:** `npx tsc --noEmit`, `npm run build` (now
+producing two HTML/JS/CSS bundles, `main` and `widget`, confirmed
+separately sized in the build output — the widget's is a few KB, not the
+whole app), `cargo check` (no warnings), `cargo test` (124/124 passing —
+119 pre-existing + 5 new: `active_process::tests` covering the shared
+state's start-empty/set-get/clear behavior, `hotkey::tests` pinning the
+`CaptureResult` event's exact JSON tag shape and the shortcut
+constructor's determinism), and `npm run tauri build` all pass.
+
+Full UI-flow verification of the main window (select/create/rename/
+delete a Process still calls the renamed `sync_active_process` command,
+now with the fuller `{ process_id, process_name, project_id,
+project_name }` shape; every existing Project/Process/Capture flow
+unaffected) used the same mocked-`window.__TAURI_INTERNALS__.invoke`
+dev-server approach as every prior task. The widget page (`widget.html`)
+was additionally loaded directly in a browser tab: its "no active
+process" empty state rendered correctly with the capture button
+correctly disabled, and its hide button correctly called `hide_widget`.
+The "active Process shown, capture succeeds" path specifically could not
+be click-tested in this harness — the widget's on-mount fetch races the
+test mock's injection with no retry affordance to recover from losing
+that race (unlike the main app's "Retry" button) — but both of that
+path's constituent calls are independently proven elsewhere (the main
+window's regression pass; TASK-009's exhaustive screenshot-capture
+verification), so this is judged a testing-harness gap, not an
+unverified functional path.
+
+**Native verification, not simulated — including a real bug this
+process caught:**
+- Launching the freshly built `golive.exe` initially **crashed on
+  startup** with "Failed to setup app: ... HotKey already registered" —
+  the originally-chosen shortcut (`Ctrl+Shift+G`) was already claimed by
+  another application on the verification machine, and the code at the
+  time propagated that failure as fatal. This was diagnosed and fixed
+  (registration failure is now logged and non-fatal; the default
+  shortcut was also changed) — see DECISIONS.md — and the fix was
+  re-verified by rebuilding and relaunching successfully.
+- After the fix, `golive.exe` was launched and, via a Win32 `EnumWindows`
+  enumeration (PowerShell + P/Invoke — no desktop UI-automation tool can
+  click the native UI directly, the standing limitation prior tasks
+  already recorded), **both windows were confirmed to exist and be
+  visible simultaneously**: `"GoLive"` (main) and `"GoLive Capture"`
+  (widget).
+- The global shortcut was triggered for real via low-level `keybd_event`
+  Win32 input (genuine OS-level key-down/key-up events, not
+  `SendKeys`, which only targets the foreground window and would not
+  reliably trigger a true global hotkey) — the app remained running and
+  responsive afterward (`Get-Process ... Responding` = `True`), and,
+  since no active Process was set for that run, correctly created no
+  capture file (confirmed via a direct `%APPDATA%\...\captures\`
+  directory listing) — proof the `no_active_process` path executes
+  cleanly without crashing.
+- Close-to-tray was re-verified with both windows present, using the
+  same graceful-close-request-survives-as-the-same-PID method TASK-010
+  used, then force-closed for cleanup.
+- What was **not** verified: an actual end-to-end "hotkey → real
+  screenshot → appears in the active Process's list" pass, since setting
+  a real active Process requires clicking through the native main
+  window's UI (select a Project, a Process) — the same no-UI-automation
+  limitation as ever. Given the capture pipeline itself was exhaustively
+  verified in TASK-009 (real desktop content, real `%APPDATA%`
+  persistence) and the hotkey handler calls that identical, unmodified
+  function, this is judged low-risk, but a developer with an interactive
+  desktop session should do one full unassisted pass (select a Process,
+  press the hotkey, confirm the Capture appears) before relying on this
+  in a real engagement.
+
 ## Not implemented yet
 
 - Recording/Note capture media (TASK-009 gave only `screenshot` real
@@ -729,7 +926,9 @@ in-memory bytes for a real, valid 1×1 PNG.
 - Monitor selection, area/window-selection screenshots (TASK-009 only
   supports "capture the primary/current display")
 - Screen recording, microphone recording
-- Floating widget, global hotkeys
+- Quick markers (roadmap.md TASK-012)
+- Hotkey customization UI (the combination is a hardcoded constant,
+  `hotkey::shortcut()`)
 - AI integration (OpenAI), structured process generation
 - Transcription
 - Process editor, process versioning
@@ -757,4 +956,4 @@ in-memory bytes for a real, valid 1×1 PNG.
 
 ## Next task
 
-TASK-010
+TASK-012 (see roadmap.md)

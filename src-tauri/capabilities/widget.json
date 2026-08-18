@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "widget",
+  "description": "Capability for the floating capture widget window (TASK-011)",
+  "windows": ["widget"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen"
+  ]
+}

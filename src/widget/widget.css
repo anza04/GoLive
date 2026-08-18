@@ -1,0 +1,112 @@
+/* Floating capture widget (TASK-011). A tiny, separate window/bundle —
+   reuses design tokens and the shared `.button`/`.button--primary`
+   styles from `App.css` (imported alongside this file in
+   `widget-main.tsx`) rather than reinventing them, but everything
+   layout-specific belongs here. */
+
+body {
+  overflow: hidden;
+}
+
+.widget {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  box-sizing: border-box;
+}
+
+.widget__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  background: var(--gradient-accent);
+  color: #ffffff;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.widget__title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.widget__hide {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: #ffffff;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+}
+
+.widget__hide:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.widget__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  min-height: 0;
+}
+
+.widget__active {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.widget__process {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.widget__project {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.widget__empty {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+}
+
+.widget__capture {
+  width: 100%;
+  justify-content: center;
+  margin-top: auto;
+}
+
+.widget__feedback {
+  margin: 0;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.widget__feedback--ok {
+  color: var(--color-success);
+}
+
+.widget__feedback--error {
+  color: var(--color-danger);
+}

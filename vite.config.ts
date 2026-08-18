@@ -29,4 +29,19 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+
+  // Two Tauri windows (TASK-011), two HTML entry points sharing the same
+  // Vite/React setup: "main" -> index.html (the full app shell),
+  // "widget" -> widget.html (the floating capture widget, a separate,
+  // much smaller React tree — see src/widget/). The dev server needs no
+  // extra config to serve widget.html; this only affects the production
+  // multi-page build.
+  build: {
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        widget: "widget.html",
+      },
+    },
+  },
 }));

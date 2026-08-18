@@ -870,3 +870,213 @@ the bytes as an `ArrayBuffer` (Tauri's `invoke()` detects a `Response`-
 returning command automatically) and wraps them in a `blob:` object URL
 for `<img src>` — the frontend never sees, stores, or could construct a
 real filesystem path for a Capture's media.
+
+## TASK-010 — Background persistence, system tray, and the active-process store
+
+**Decision:** the system tray was built using Tauri's own built-in
+`tray-icon` Cargo feature (`TrayIconBuilder`/`Menu`/`MenuItem` from the
+`tauri` crate itself), not a separate third-party crate.
+**Reason:** Tauri 2 ships first-party tray/menu support behind a feature
+flag — there was no third-party alternative to evaluate; enabling an
+existing capability of an already-required dependency isn't the same
+kind of choice adding `xcap` (TASK-009) was, so this needed no
+alternatives-considered analysis the way a genuine new dependency would.
+**Consequence:** zero new entries in the dependency inventory (§15) —
+`tray-icon`/`muda` arrive as `tauri`'s own transitive dependencies once
+the feature is on, not as a project-level dependency decision.
+
+**Decision:** the active Process is held in a plain React Context
+(`ActiveProcessProvider`/`useActiveProcess`, `src/stores/
+activeProcess.tsx`) — the first real occupant of `src/stores/` — rather
+than a state-management library (Redux, Zustand, Jotai, etc.).
+**Reason:** docs/architecture.md §11 committed to "the simplest option
+that fits" being chosen only once `stores/` state was actually needed,
+not decided speculatively — and once it was needed, nothing about this
+requirement (one small piece of state, a handful of readers, no
+cross-tab/cross-window sync, no time-travel/devtools need) called for
+more than Context provides. Adding a library here would have been
+exactly the kind of "introduce a global state library" this project's
+task briefs repeatedly forbid without a concrete reason.
+**Consequence:** `ActiveProcessProvider` is mounted once, in `App.tsx`,
+above everything that needs to read or write the active process — a
+few dozen lines, no new dependency, and (per §11) still a "same-shape
+swap" away from a library later if a genuine reason ever appears.
+
+**Decision:** selecting a Process in the UI implicitly marks it "active"
+— there is no separate "Set as active" button/action.
+**Reason:** this was this task's own call to make (the brief explicitly
+left it open). An explicit second action for something the user is
+already doing (looking at a Process) would be one more click for a
+distinction most users would never consciously make — "the process I'm
+currently looking at" already *is* "the process I'm currently working
+on" for GoLive's actual use case (a consultant working through one
+Process at a time). Renaming or deleting the active Process (or its
+Project) automatically re-syncing/clearing the store follows the same
+"the store should reflect reality without extra clicks" principle.
+**Consequence:** `ProcessesView.markActive` is the one function every
+select/create/rename path funnels through, keeping the "when does this
+update" logic in one place rather than scattered per call site.
+
+**Decision:** `Builder::on_window_event` (a single, app-wide handler) was
+used for the close-to-tray behavior, intercepting `WindowEvent::
+CloseRequested` on every window, rather than attaching a listener to the
+`"main"` window specifically inside `.setup()`.
+**Reason:** with exactly one window today, the two approaches are
+behaviorally identical, and the app-wide handler is less code. Explicitly
+flagged (in docs/architecture.md §23 and here) as something to revisit
+once a second window exists (TASK-011's floating capture widget) — that
+window almost certainly should *not* hide-on-close the same way the main
+window does (closing a small utility widget should probably just close
+it, not hide the whole app), so the handler will likely need to branch on
+`window.label()` at that point.
+**Consequence:** one extra thing explicitly called out for TASK-011 to
+reconsider, rather than a piece of behavior quietly assumed to still be
+correct once a second window shows up.
+
+**Decision:** `set_active_process_tray` (`commands::tray`) is infallible
+from the frontend's point of view — it returns nothing (no `Result`,
+no `AppError`) — even though the underlying native `set_tooltip`/
+`set_text` calls can themselves fail.
+**Reason:** unlike every other command in this codebase, there is no
+user-facing consequence to this operation failing — updating a tray
+label is a cosmetic side channel nothing in the UI observes or reacts to
+(no error dialog is ever planned for "the tray didn't update"). Forcing
+a `Result<(), AppError>` return here would mean either inventing an
+`AppError` variant with no real user-facing meaning, or overreaching to
+reuse an existing one that doesn't fit any better than `Capture` did for
+screenshot failures (TASK-009) — for a failure mode nobody needs to see.
+**Consequence:** `TrayHandles::set_active_process` logs
+`set_tooltip`/`set_text` failures to stderr and otherwise ignores them —
+consistent with how `CaptureService::delete` (TASK-009) already treats a
+non-critical, non-user-facing cleanup failure.
+
+## TASK-011 — Global hotkey and floating capture widget
+
+**Decision:** the floating widget is a genuinely separate Tauri window
+(`tauri.conf.json`'s second `windows[]` entry, `url: "widget.html"` — a
+second Vite/HTML entry point, see `vite.config.ts`'s
+`build.rollupOptions.input`) with its own small React tree
+(`src/widget/`), rather than a second "mode" rendered by the existing
+`App.tsx`/`index.html` behind a route or `?widget=1`-style flag.
+**Reason:** Tauri windows load independent webview instances; there is
+no way for a single HTML/JS bundle loaded twice to share React state
+between the two loads regardless of routing scheme — the "one bundle,
+two modes" approach would have looked simpler in the file tree but
+bought nothing architecturally, while still needing the exact same
+cross-window sync mechanism (see below) since the two windows still
+can't share memory. A second small HTML/JS entry, conversely, means the
+widget's production bundle only contains what the widget needs (confirmed
+by the build output: ~2KB JS/1.4KB CSS for `widget`, vs. the full app's
+~30KB+196KB vendor chunk for `main`) rather than shipping the entire
+Projects/Processes/Captures UI to a window that only ever shows one
+button.
+**Consequence:** `src/widget/` is a new top-level sibling of `features/`
+(see docs/architecture.md §2), not a route inside `features/projects/`
+or a "feature" of the main app — genuinely a second, small, separate
+frontend, wired into the same Vite project via a second HTML entry.
+
+**Decision:** the active Process is mirrored into a small piece of
+Tauri-managed Rust state (`active_process::ActiveProcessState`) and
+broadcast to every window via `AppHandle::emit` on every change, rather
+than (a) having the widget poll a command on an interval, or (b) trying
+to share state directly between windows some other way.
+**Reason:** polling would mean either a noticeable delay before the
+widget reflects a change or wasted IPC calls most of which return
+"nothing changed"; there is no supported way in Tauri (or the web
+platform generally) for two separate webview instances to share JS
+memory directly. Routing the sync through Rust — which every window can
+already reach via IPC/events regardless of which two (or more, in the
+future) windows exist — is also the shape that scales cleanly if a third
+window (or a fourth) ever needs the same information, unlike a scheme
+built assuming exactly two windows know about each other.
+**Consequence:** Rust, not any one frontend window, is now the source of
+truth for "what does every window currently believe the active Process
+is" — the frontend `stores/activeProcess.tsx` Context remains the source
+of truth for *deciding* what it should be (i.e. it still owns
+select/create/rename/delete logic), but `ActiveProcessState` is what
+actually keeps every window's *view* of that decision consistent.
+
+**Decision:** the global keyboard shortcut is registered and handled
+entirely in Rust (`hotkey.rs`, using `tauri_plugin_global_shortcut`'s
+native API) — no window's frontend JS is involved in triggering a
+capture this way, and the `@tauri-apps/plugin-global-shortcut` npm
+package was not added at all.
+**Reason:** a global OS-level hotkey has no "requesting window" the way
+a button click does — there is no natural window to route the event
+through even if we wanted to, and picking one arbitrarily (e.g. "always
+the main window, even if hidden") would create a dependency on that
+window's JS being alive and its listener mounted for the feature to work
+at all. Every dependency the capture actually needs — the active Process
+(`ActiveProcessState`) and `CaptureService::create_screenshot` (§22) — is
+already reachable directly from Rust, so bouncing through IPC to a
+window and back would add a hop and a failure mode (that window's JS not
+responding) for no benefit.
+**Consequence:** `hotkey::handle_capture_shortcut` constructs its own
+`CaptureService` the same way `commands::capture`'s `service()` helper
+and `lib.rs`'s startup reconciliation call each already independently
+do — a small, now three-times-repeated few lines, accepted as
+reasonable duplication (matching existing precedent) rather than
+introducing a shared constructor that would couple the Tauri-free
+`services::capture` module to `tauri::AppHandle`.
+
+**Decision (a genuine bug found and fixed during this task, not a
+speculative design choice):** global-shortcut registration failure
+(`app.global_shortcut().register(...)`) is handled with a logged warning,
+never propagated via `?` out of `.setup()`.
+**Reason:** the first version of this code *did* use `?`, on the
+assumption registration failure would be rare/theoretical. During this
+task's own manual verification, the originally-chosen shortcut
+(`Ctrl+Shift+G`) turned out to already be registered by another
+application on the verification machine, and `.setup()` returning `Err`
+made Tauri treat it as a fatal startup failure — the entire application
+crashed on launch, `panic!`-ing with "Failed to setup app". No shortcut
+choice can be guaranteed collision-free on every user's machine (any
+combination might already be claimed by some other running software), so
+this cannot be treated as an edge case to ignore.
+**Consequence:** two changes, not one: registration failure is now
+non-fatal (logged, GoLive starts normally with the hotkey simply
+inactive), and the default shortcut was also changed to a three-modifier
+combination (`Ctrl+Alt+Shift+S`) specifically chosen to be less likely to
+collide with a single- or double-modifier shortcut some other
+application registered first — belt-and-suspenders, since the real fix
+is the non-fatal handling, not the specific key choice.
+
+**Decision:** the widget's own "hide" button calls a dedicated
+`hide_widget` Tauri command (a plain app-defined command) rather than
+calling `@tauri-apps/api/window`'s `getCurrentWindow().hide()` directly
+from the widget's frontend.
+**Reason:** window self-operations like `hide`/`show` are gated by the
+Tauri 2 ACL and are **not** included in `core:default` — using the raw
+API would have required adding `core:window:allow-hide` to
+`capabilities/widget.json`. A dedicated app-defined command sidesteps
+this entirely, since app-defined commands (registered via
+`invoke_handler!`) aren't ACL-gated at all — the same property already
+relied on for every other command in this codebase. This keeps the
+widget's capability grant to exactly one addition
+(`core:event:allow-listen`, for the event-listening it does need) instead
+of two.
+**Consequence:** every window-visibility operation in this app — hiding
+the main window on close, hiding/showing the widget, opening the main
+window from the tray — now goes through either Rust-internal code
+(`lib.rs`'s `on_window_event`, `tray.rs`'s menu handlers) or a
+custom command (`hide_widget`), never a capability-gated core window API
+called from JS. One consistent pattern, and one fewer permission surface
+to reason about.
+
+**Decision:** `lib.rs`'s `on_window_event` close-to-tray handler was
+**not** changed to branch on window label when the widget (a second
+window) was added, resolving the question TASK-010's own documentation
+had explicitly flagged as needing revisiting.
+**Reason:** on reflection, the reason main-window-hide-on-close exists —
+"the user's only visible way back into a hidden GoLive shouldn't be
+destroyed" — applies just as much to the widget once it exists: hiding
+GoLive's whole window and also permanently destroying the widget (e.g.
+via a stray Alt+F4) would be an easy way to lose the widget with no
+menu-driven way back other than "Toggle Widget" happening to still find
+a window object that no longer exists. Keeping both windows
+hide-on-close means `tray::toggle_widget`'s `get_webview_window("widget")`
+lookup can always assume the window exists, not handle "it was destroyed
+and needs recreating."
+**Consequence:** no branching logic was added; the single handler from
+TASK-010 was correct as originally written, once actually reconsidered
+rather than assumed to need a change.

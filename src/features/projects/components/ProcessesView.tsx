@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { getErrorMessage } from "../../../utils/errorMessage";
+import { useActiveProcess } from "../../../stores/activeProcess";
 import { ProcessList } from "./ProcessList";
 import { ProcessDetail } from "./ProcessDetail";
 import { CreateProcessDialog } from "./CreateProcessDialog";
@@ -9,6 +10,9 @@ import { listProcesses, type Process } from "../services/processes";
 
 interface ProcessesViewProps {
   projectId: string;
+  /** Only needed to label the active-process store/tray (TASK-010) — the
+   * project's own name isn't otherwise used by this view. */
+  projectName: string;
 }
 
 // Selection stays local to this view, mirroring ProjectsView's original
@@ -19,12 +23,13 @@ interface ProcessesViewProps {
 // layer, per this task's "keep the architecture simple" instruction.
 type ListState = { state: "loading" } | { state: "ready" } | { state: "error"; message: string };
 
-export function ProcessesView({ projectId }: ProcessesViewProps) {
+export function ProcessesView({ projectId, projectName }: ProcessesViewProps) {
   const [processes, setProcesses] = useState<Process[]>([]);
   const [listState, setListState] = useState<ListState>({ state: "loading" });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Process | null>(null);
+  const { activeProcess, setActiveProcess, clearActiveProcess } = useActiveProcess();
 
   useEffect(() => {
     void refresh();
@@ -42,21 +47,45 @@ export function ProcessesView({ projectId }: ProcessesViewProps) {
     }
   }
 
+  // The one place all four "this process is now the one on screen"
+  // moments (select, create, and — see below — a rename of the already-
+  // active process) funnel through, so the active-process store/tray
+  // (TASK-010) never drifts from what's actually selected here.
+  function markActive(process: Process) {
+    setActiveProcess({
+      processId: process.id,
+      processName: process.name,
+      projectId,
+      projectName,
+    });
+  }
+
+  function handleSelect(id: string) {
+    setSelectedId(id);
+    const process = processes.find((candidate) => candidate.id === id);
+    if (process) markActive(process);
+  }
+
   function handleCreated(process: Process) {
     setProcesses((prev) => [process, ...prev]);
     setSelectedId(process.id);
+    markActive(process);
     setCreateOpen(false);
   }
 
   function handleUpdated(updated: Process) {
     // Matches the backend's `updated_at DESC` order without a re-fetch.
     setProcesses((prev) => [updated, ...prev.filter((process) => process.id !== updated.id)]);
+    // Keeps the tray's label from going stale if the active process was
+    // just renamed.
+    if (activeProcess?.processId === updated.id) markActive(updated);
   }
 
   function handleGone(id: string) {
     setProcesses((prev) => prev.filter((process) => process.id !== id));
     setSelectedId((current) => (current === id ? null : current));
     setDeleteTarget(null);
+    if (activeProcess?.processId === id) clearActiveProcess();
   }
 
   if (listState.state === "loading") {
@@ -118,7 +147,7 @@ export function ProcessesView({ projectId }: ProcessesViewProps) {
             + New process
           </button>
         </div>
-        <ProcessList processes={processes} selectedId={selectedId} onSelect={setSelectedId} />
+        <ProcessList processes={processes} selectedId={selectedId} onSelect={handleSelect} />
       </div>
 
       <div className="processes-detail-pane">

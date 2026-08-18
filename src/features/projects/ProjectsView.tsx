@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { getErrorMessage } from "../../utils/errorMessage";
+import { useActiveProcess } from "../../stores/activeProcess";
 import { ProjectList } from "./components/ProjectList";
 import { ProjectWorkspace } from "./components/ProjectWorkspace";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
@@ -22,6 +23,7 @@ export function ProjectsView() {
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  const { activeProcess, clearActiveProcess } = useActiveProcess();
 
   useEffect(() => {
     void refresh();
@@ -56,6 +58,10 @@ export function ProjectsView() {
     setProjects((prev) => prev.filter((project) => project.id !== id));
     setActiveProject(null);
     setDeleteTarget(null);
+    // The active-process store/tray (TASK-010) must not keep pointing at
+    // a Process whose Project just got deleted (its Process was already
+    // removed by the database cascade).
+    if (activeProcess?.projectId === id) clearActiveProcess();
   }
 
   if (listState.state === "loading") {

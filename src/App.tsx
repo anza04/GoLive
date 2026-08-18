@@ -5,6 +5,7 @@ import { Header } from "./components/layout/Header";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { checkFoundationStatus } from "./services/foundation";
+import { ActiveProcessProvider } from "./stores/activeProcess";
 import type { AppView, NavItem } from "./types/navigation";
 import "./App.css";
 
@@ -47,24 +48,26 @@ function App() {
   const statusDetail = status.state !== "checking" ? status.message : undefined;
 
   return (
-    <AppShell
-      sidebar={
-        <Sidebar
-          items={NAV_ITEMS}
-          activeView={activeView}
-          onNavigate={setActiveView}
-        />
-      }
-      header={
-        <Header
-          title={activeLabel}
-          status={status.state}
-          statusDetail={statusDetail}
-        />
-      }
-    >
-      <ActivePage />
-    </AppShell>
+    <ActiveProcessProvider>
+      <AppShell
+        sidebar={
+          <Sidebar
+            items={NAV_ITEMS}
+            activeView={activeView}
+            onNavigate={setActiveView}
+          />
+        }
+        header={
+          <Header
+            title={activeLabel}
+            status={status.state}
+            statusDetail={statusDetail}
+          />
+        }
+      >
+        <ActivePage />
+      </AppShell>
+    </ActiveProcessProvider>
   );
 }
 

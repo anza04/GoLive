@@ -43,6 +43,7 @@ src/
   stores/       cross-feature client-side state
   types/        shared TypeScript domain types
   utils/        small pure helpers
+  widget/       the floating capture widget's own small React app (§24)
 ```
 
 Conventions per folder:
@@ -70,19 +71,33 @@ Conventions per folder:
   features (Project, Process, Capture, ...). Currently empty — no domain
   entities exist yet (see §5).
 - **`utils/`** — Small, pure, framework-agnostic helpers with no domain
-  ownership. Currently empty.
+  ownership.
+- **`widget/`** (TASK-011) — the floating capture widget's own root
+  component (`Widget.tsx`), entry point (`widget-main.tsx`, mounted by
+  `widget.html`, a second Vite/HTML entry alongside `index.html`), and
+  stylesheet. Deliberately a top-level sibling of `features/`, not a
+  feature inside the main app: it's a genuinely separate small React
+  tree running in a second Tauri window with no shared JS memory with
+  `App.tsx`'s tree — "a feature of the app" would misdescribe that. It
+  still reuses `App.css`'s design tokens/`.button` styles and imports
+  directly from `features/projects/services/captures.ts` for the one
+  operation (`createScreenshotCapture`) both windows must call
+  identically — see §24.
 
-**Current contents:** `App.tsx` composes the application shell (see §16).
+**Current contents:** `App.tsx` composes the application shell (see §16),
+wrapped in `stores/activeProcess.tsx`'s `ActiveProcessProvider` (TASK-010).
 `components/layout/` holds `AppShell`, `Sidebar`, `Header`; `components/ui/`
 holds the generic pieces reused across the app so far — `EmptyState`,
 `StatusPill`, `Dialog`. `pages/ProjectsPage.tsx` is now a thin wrapper
 around the real `features/projects/` feature (see §18);
 `pages/SettingsPage.tsx` is still a placeholder. `types/` holds
 `navigation.ts`. `services/` holds the app-level Tauri wrappers
-(`foundation.ts`, `storage.ts`); `features/projects/services/projects.ts`
-holds the feature-specific ones. `utils/` holds `formatDate.ts` and
-`errorMessage.ts`. `stores/` remains empty — nothing needs it yet (see
-§11).
+(`foundation.ts`, `storage.ts`, `activeProcess.ts`, `widget.ts` — the last
+two added TASK-010/011); `features/projects/services/projects.ts` and
+siblings hold the feature-specific ones. `utils/` holds `formatDate.ts`
+and `errorMessage.ts`. `stores/` holds `activeProcess.tsx` (§11, §23) —
+its first occupant, no longer empty. `widget/` (TASK-011, see above) is
+the newest top-level folder.
 
 ## 3. Current Rust/Tauri structure
 
@@ -90,6 +105,9 @@ holds the feature-specific ones. `utils/` holds `formatDate.ts` and
 
 ```
 src-tauri/
+  capabilities/
+    default.json             main window's capability (core:default)
+    widget.json                widget window's capability (see §13, §24)
   migrations/
     0001_initial.sql        infrastructure-only migration (see §17)
     0002_projects.sql        Project domain schema (see §18)
@@ -99,6 +117,9 @@ src-tauri/
     main.rs                 entry point
     lib.rs                  Tauri builder, .setup() hook, command registration
     errors.rs                AppError (see §10)
+    active_process.rs         ActiveProcessState: cross-window active-
+                               Process mirror (see §24)
+    hotkey.rs                  global-shortcut registration + handler (§24)
     commands/
       foundation.rs           check_foundation_status
       storage.rs               get_local_storage_status
@@ -107,6 +128,10 @@ src-tauri/
       capture.rs                  create/list/get/update/delete_capture,
                                     create_screenshot_capture,
                                     get_capture_media (§21, §22)
+      active_process.rs           sync_active_process, get_active_process
+                                    (§23, §24 — supersedes TASK-010's
+                                    commands::tray)
+      widget.rs                   hide_widget (§24)
     db/
       mod.rs                   DbService: init, pool access
       pool.rs                  r2d2 pool construction + PRAGMAs
@@ -139,6 +164,7 @@ src-tauri/
       capture.rs                   CaptureService: validation, id/timestamp
                                     generation, process-existence check,
                                     screenshot/media orchestration (§21, §22)
+    tray.rs                      system tray icon + menu (see §23, §24)
 ```
 
 `commands/`, `db/`, and `repositories/` were introduced by TASK-004.
@@ -155,6 +181,21 @@ capture engines, the first real occupant of the "Native Windows
 functionality boundary", §9) — rather than folding either into an
 existing module, since neither is domain logic (`services/`),
 persistence-via-SQLite (`repositories/`), or a Tauri command (`commands/`).
+TASK-010 added a third top-level module, `tray.rs` — infrastructure that
+owns one native OS resource (the tray icon) for the app's whole lifetime,
+the same "own a resource, expose a small typed handle via managed state"
+shape `db::DbService`/`media::MediaStorage` already established, not
+domain logic or persistence either. TASK-011 added two more,
+`active_process.rs` (the cross-window active-Process mirror, same
+managed-state shape again) and `hotkey.rs` (the global-shortcut
+registration + handler — `native/`'s sibling for a *global*, not
+per-display, native capability), plus a second capability file
+(`capabilities/widget.json`) and a second `commands/` file
+(`active_process.rs`, `widget.rs`) — see §24 for the full picture.
+`commands::tray::set_active_process_tray` (TASK-010) no longer exists:
+`commands::active_process::sync_active_process` supersedes it, carrying
+full Process/Project identity (not just display names) so the floating
+widget can act on the active Process, not only show it.
 
 ## 4. Frontend → Tauri communication
 
@@ -283,16 +324,21 @@ introduced by this task.
 
 ## 9. Native Windows functionality boundary
 
-**PARTIALLY CURRENT (TASK-009).** Screenshot capture is the first real
-occupant: `native::screenshot::ScreenshotEngine` (see §22). Screen
-recording, microphone capture, and global shortcuts remain **FUTURE**.
+**PARTIALLY CURRENT (TASK-009, TASK-011).** Screenshot capture
+(`native::screenshot::ScreenshotEngine`, §22) and the global capture
+shortcut (`hotkey.rs`, §24) are real. Screen recording and microphone
+capture remain **FUTURE**.
 
 **Rule:** this functionality is implemented as Rust/Tauri services exposed
 through commands. React consumes a clean application API (e.g. "start
 recording", "take screenshot") — it never manipulates Windows APIs
 directly, as demonstrated by `create_screenshot_capture` (§22): the
 frontend asks for a screenshot, the native `xcap`-based engine and
-Windows GDI details never surface above `commands::capture`.
+Windows GDI details never surface above `commands::capture`. The global
+shortcut (§24) goes one step further: it has no frontend involvement in
+triggering a capture *at all* — no window's JS ever touches
+`tauri-plugin-global-shortcut` — since a global hotkey has no
+"requesting window" a command model assumes.
 
 ## 10. Error handling
 
@@ -350,24 +396,30 @@ deeper, `ProcessesView` (rendered by `ProjectWorkspace`'s "Processes" tab,
 TASK-007) owns its own `selectedId: string | null` — deliberately the
 simpler, TASK-005-style shape rather than a second "active process"
 promoted to a full record, since Processes is a list+detail pane, not
-another full workspace/back-navigation layer (see §20). Neither is a
-global store. No state management library is installed.
+another full workspace/back-navigation layer (see §20). Both remain
+feature-local. `src/stores/` got its first real occupant in TASK-010 —
+see below and §23. No state management library is installed.
 
 **Rule:**
 - **Local UI state** (modal open/closed, form fields, a single component's
   status) → local component state (`useState`/`useReducer`). Default
   choice. Example: `CreateProjectDialog`/`EditProjectDialog`'s form fields
   and submitting flag.
-- **Feature state** (e.g. active project, future active-recording state,
-  process-editor state) → owned within that feature, introduced only once
-  the feature needs it. Example: `activeProject` in `ProjectsView` —
-  deliberately just `useState<Project | null>`, so if a future feature
-  (e.g. a floating widget) needs to know the current project too, this is
-  a same-shape swap into a `stores/` slice, not a rewrite.
-- **Application state** (e.g. future global settings) → `src/stores/`,
-  introduced only once at least two features genuinely need to share it.
-  Still empty — active-project state doesn't qualify yet, since only the
-  Projects feature reads it.
+- **Feature state** (e.g. process-editor state) → owned within that
+  feature, introduced only once the feature needs it. Example:
+  `activeProject` in `ProjectsView` — deliberately just
+  `useState<Project | null>`.
+- **Application state** (genuinely cross-feature) → `src/stores/`,
+  introduced only once at least two consumers genuinely need to share it.
+  `stores/activeProcess.tsx` (TASK-010) is the first occupant — "which
+  Process is active" is read by `ProcessesView`/`ProjectsView` (to set/
+  clear it) and, outside React entirely, by the system tray via
+  `services/tray.ts` (see §23) — exactly the "future feature needing the
+  current process too" scenario this section anticipated back in TASK-007,
+  now real. Implemented as a plain React Context
+  (`ActiveProcessProvider`/`useActiveProcess`, mounted once in `App.tsx`)
+  rather than a library — still "the simplest option that fits," per this
+  section's original plan, not a reason to add a dependency.
 
 No state management library is adopted by this task. If/when `stores/`
 state is actually needed, the simplest option that fits (React context, or
@@ -391,17 +443,28 @@ a minimal library) is chosen at that time — not decided speculatively now.
 ## 13. Tauri security / capabilities
 
 **CURRENT:** [`src-tauri/capabilities/default.json`](../src-tauri/capabilities/default.json)
-grants exactly one permission: `core:default`. No filesystem, shell,
-global-shortcut, microphone, screen-capture, HTTP, or process-control
-permissions are requested.
+(scoped to the `main` window) grants `core:default` only. TASK-011 added
+a second file, [`capabilities/widget.json`](../src-tauri/capabilities/widget.json)
+(scoped to the `widget` window only — capabilities are per-window, see
+`"windows"` in each file), granting `core:default` plus
+`core:event:allow-listen` — the one additional permission the floating
+widget genuinely needs, to receive the active-Process/screenshot-result
+events Rust broadcasts (see §24). No filesystem, shell, microphone,
+screen-capture, or HTTP permission is requested by either window.
+`global-shortcut:*` permissions were deliberately **not** added anywhere:
+the shortcut is registered and handled entirely in Rust (`hotkey.rs`) —
+no window's JS ever calls the plugin's IPC-facing commands, so no
+capability grant was needed for it (Rust-side native API calls aren't
+gated by the frontend ACL at all; only IPC crossing into the webview is).
 
 **Rule:** each future capability (filesystem access for project storage,
-global shortcuts, microphone, screen capture, HTTP for the AI provider,
-etc.) is added only in the task that implements the corresponding
-functionality, scoped as narrowly as Tauri allows for that feature. No
-capability is granted ahead of the code that needs it. The Project
-commands (TASK-005) needed none of these — they only touch the already-
-managed SQLite connection — so capabilities are unchanged.
+microphone, screen capture, HTTP for the AI provider, etc.) is added only
+in the task that implements the corresponding functionality, scoped as
+narrowly as Tauri allows for that feature — and, as of TASK-011, scoped
+to the specific window that actually needs it, not granted app-wide by
+default. No capability is granted ahead of the code that needs it. The
+Project commands (TASK-005) needed none of these — they only touch the
+already-managed SQLite connection — so capabilities were unchanged then.
 
 CSP is currently `null` (framework default). It will be tightened once the
 app's actual resource-loading needs (fonts, local media, any remote calls)
@@ -427,7 +490,7 @@ working one just to shrink the list.
 | Package | Purpose |
 |---|---|
 | `react`, `react-dom` | UI framework |
-| `@tauri-apps/api` | `invoke()` and other frontend↔Tauri bindings |
+| `@tauri-apps/api` | `invoke()` and other frontend↔Tauri bindings. TASK-011 is the first to use its `event` sub-module (`listen()`, in `services/activeProcess.ts`/`features/projects/services/captures.ts`) alongside `core` — not a new package, already covered by this one. |
 | `typescript` | Type checking |
 | `vite`, `@vitejs/plugin-react` | Dev server / build tooling |
 | `@tauri-apps/cli` | `tauri dev` / `tauri build` commands |
@@ -440,12 +503,13 @@ working one just to shrink the list.
 | `tauri` | Desktop shell / command runtime |
 | `tauri-build` | Build-time codegen (build.rs) |
 | `serde` (derive) | (De)serialization — now actually used: `LocalStorageStatus`, `AppError`. |
-| `serde_json` | JSON value handling — still unused directly by our code; kept for the same reason as before (near-certain need once AI/JSON payloads exist), see TASK-002 decision. |
+| `serde_json` | JSON value handling — now used directly (`hotkey::tests` pins the `CaptureResult` wire shape via `serde_json::to_string`), on top of the original reason it was kept (near-certain need once AI/JSON payloads exist), see TASK-002 decision. |
 | `rusqlite` (`bundled`) | Embedded SQLite bindings. `bundled` statically compiles SQLite into the binary — no system SQLite install required (see §17, DECISIONS.md). |
 | `r2d2`, `r2d2_sqlite` (`bundled`) | Connection pool for `rusqlite`, so one long-running database operation doesn't block every other one (see §17, "Concurrency"). |
 | `thiserror` | Derives `AppError`'s `Display`/`std::error::Error` impl (§10) with minimal boilerplate. |
 | `uuid` (`v4`) | Generates `Project` ids (§18). Already an indirect dependency of the toolchain; added as a direct one now that our own code (`ProjectService`) actually calls it. |
 | `xcap` (`image` feature) | TASK-009: captures the primary Windows display and encodes it as PNG (`native::screenshot::WindowsScreenshotEngine`, §22). Chosen over hand-rolling a GDI capture directly against the `windows` crate — `xcap` already wraps that (plus macOS/Linux backends we don't use, but don't pay extra for either — they're behind per-platform `[target.'cfg(...)'.dependencies]` and never compiled into the Windows build) behind a small, actively maintained API (`Monitor::all()` / `capture_image()`) that does exactly what this task needs and nothing more; it re-exports the `image` crate it already depends on (`xcap::image`), so no separate `image` dependency was added. `xcap`'s optional Windows-Graphics-Capture backend (`wgc` feature, extra Direct3D/DXGI bindings) was deliberately **not** enabled — the default GDI backend is the simplest reliable option for "capture the primary display," and TASK-009 explicitly scopes to that one mode (see DECISIONS.md). |
+| `tauri-plugin-global-shortcut` (target `cfg(any(macos, windows, linux))`, matching the plugin's own documented Cargo.toml line) | TASK-011: registers and handles the global capture keyboard shortcut (`hotkey.rs`, §24). Tauri's own first-party plugin for this — no alternative crate was evaluated, the same way `tray-icon` (TASK-010) needed no alternatives-considered analysis. Only its Rust API is used (`GlobalShortcutExt`, `Builder::with_handler`); the JS-side `@tauri-apps/plugin-global-shortcut` package was deliberately not added, since no window's frontend registers, unregisters, or otherwise touches shortcuts — see DECISIONS.md. |
 
 **Dev-only:** `tempfile` — isolated temp directories for the database
 tests (§17), never touching the real per-user app-data directory.
@@ -1402,12 +1466,291 @@ a placeholder — plus a full real-`%APPDATA%` create → simulated-restart
 `MediaStorage` code, proving the whole pipeline, not just `xcap` in
 isolation).
 
+## 23. Background persistence, system tray, and the active-process store (TASK-010)
+
+**CURRENT.** The first milestone-M1 step (see roadmap.md): lets GoLive
+keep running with its main window hidden, and introduces the app's first
+genuinely cross-feature client state.
+
+```
+Closing the main window:
+
+React (nothing — this is Rust-only)
+    ↑
+tauri::Builder::on_window_event   WindowEvent::CloseRequested
+    ↓                              → api.prevent_close() + window.hide()
+window stays hidden, process keeps running
+
+Reopening / quitting:
+
+Tray icon menu ("Open GoLive" / "Quit")
+    ↓
+tray::build's on_menu_event       "open" → window.show()+set_focus()
+                                    "quit" → app.exit(0)   (the only real exit,
+                                              besides a window-manager force-close)
+
+Reflecting the active Process in the tray:
+
+ProcessesView (select/create/rename) or ProjectsView (delete)
+    ↓
+stores/activeProcess.tsx           ActiveProcessProvider — React Context
+    ↓ setActiveProcess()/clearActiveProcess()
+services/tray.ts                   syncActiveProcessTray()
+    ↓ invoke("set_active_process_tray")
+commands::tray::set_active_process_tray   thin — delegates
+    ↓
+tray::TrayHandles::set_active_process      updates tooltip + menu label live
+```
+
+**Tray icon** (`tray.rs`, Cargo feature `tray-icon` on the `tauri`
+dependency — no third-party crate, this is Tauri's own built-in
+capability): built once in `.setup()` via `TrayIconBuilder`, with a
+three-item menu — a disabled, purely informational "Active: …"/"No
+active process" label, "Open GoLive", "Quit". The built `TrayIcon` and
+the active-label `MenuItem` handle are kept in Tauri-managed state
+(`TrayHandles`) so later calls (from the command below) can update them
+live via `set_tooltip`/`set_text` — no menu rebuild needed. This is the
+same "own one native resource for the app's lifetime, expose it through
+managed state" shape `db::DbService`/`media::MediaStorage` already
+established (see §17, §22), now for a UI resource instead of a
+filesystem/database one.
+
+**Close-to-tray** (`lib.rs`, `Builder::on_window_event`): intercepts
+`WindowEvent::CloseRequested`, calls `api.prevent_close()`, and hides the
+window instead. Applies to every window the app creates; today there is
+only `"main"` (now given an explicit `"label": "main"` in
+`tauri.conf.json`, rather than relying on Tauri's implicit default), so
+this is effectively main-window-only. **Revisit before TASK-011** adds a
+second window (the floating capture widget) — it should very likely not
+hide-on-close the same way a "quit the app" click on the main window
+should. The tray's "Quit" menu item (`app.exit(0)`) is the only real exit
+besides a normal window-manager force-close (`taskkill`, Task Manager,
+etc.) — proven manually: sending a graceful close request to the running
+process left it running (same PID) rather than exiting; see
+PROJECT_STATE.md.
+
+**The active-process store** (`src/stores/activeProcess.tsx`) — the
+first real occupant of `src/stores/`, and the concrete case §11 has
+anticipated since TASK-007 ("if a future feature — e.g. a floating
+widget — needs to know the current project too, this is a same-shape
+swap into a `stores/` slice, not a rewrite"). Implemented as a plain
+React Context (`ActiveProcessProvider`, mounted once around everything in
+`App.tsx`; `useActiveProcess()` hook) — not a state-management library,
+per §11's own "simplest option that fits" rule; nothing here needed more
+than Context provides. Purely client-side: no backend model, nothing
+persisted, cleared back to `null` on every fresh launch. The one thing
+outside React that reads it is the system tray, kept in sync as a side
+effect of `setActiveProcess`/`clearActiveProcess` (via
+`services/tray.ts`) so every call site that changes the active process
+automatically keeps the tray correct without remembering to do so itself.
+
+**What sets/clears it** (`ProcessesView.tsx`/`ProjectsView.tsx`):
+- Selecting a Process in the list, or a newly created Process being
+  auto-selected, marks it active (implicit-on-select was chosen over a
+  separate explicit "Set active" action — simplest, and matches "the
+  process you're currently looking at is the one you're working on").
+- Renaming the *currently active* Process re-marks it active with the
+  new name, so the tray label can't go stale after an edit.
+- Deleting the active Process, or deleting its parent Project (which
+  cascades to the Process — see §20), clears it.
+- Everything else (switching which Project's workspace is open,
+  selecting a different, non-active Process elsewhere, editing a
+  non-active Process) leaves it untouched — the active process is a
+  standing "what am I working on" marker, not tied to what's currently
+  on screen.
+
+**Errors:** none new. `set_active_process_tray` is intentionally
+infallible from the frontend's perspective — updating a tray label is a
+cosmetic side effect nothing in the UI needs to react to failing; a
+native tray-API failure is logged server-side and otherwise ignored (see
+`TrayHandles::set_active_process`).
+
+**Testing:** 119 Rust tests (was 117) — 2 new (`tray::tests`), covering
+the one piece of pure logic in `tray.rs` (tooltip/menu-label text
+formatting for both the "active" and "no active process" cases) directly,
+without a real tray icon — native tray/menu handles can't be constructed
+outside a running Tauri app, the same category of limitation §22 already
+documents for real screen capture. UI-flow verification (select → tray
+call recorded with the right `{ process_name, project_name }` shape →
+select a different Process → re-synced → rename the active Process →
+re-synced with the new name → delete the active Process → tray call is
+`null` → re-select the other Process → delete its *Project* → tray call
+is `null` again → Settings and existing Project/Process/Capture flows
+unaffected) was verified against the Vite dev server with the same
+mocked-`window.__TAURI_INTERNALS__.invoke` approach as every prior task,
+extended with a `set_active_process_tray` handler recording its calls.
+Close-to-tray was verified against the compiled `golive.exe` directly (a
+UI-level pass, not mockable): launched, confirmed running via `tasklist`,
+sent a graceful window-close request, and confirmed the *same process*
+was still running several seconds later — proof the close was
+intercepted and the window hidden rather than the app exiting — then
+force-closed for cleanup. Actually clicking the tray icon's "Open
+GoLive"/"Quit" menu items could not be verified, the same native-UI
+limitation §22 and PROJECT_STATE.md already record (no desktop
+UI-automation tool is available in this environment for the native
+window/tray, only for a real web browser tab).
+
+## 24. Global hotkey and floating capture widget (TASK-011)
+
+**CURRENT.** The first step to actually deliver on the product's core
+premise — capturing evidence "while users are performing their actual
+work," per README.md — rather than requiring the user to switch into
+GoLive first. Screenshot only; scope explicitly excludes recording,
+audio, and quick markers (those are later roadmap.md steps).
+
+```
+Two ways to trigger a screenshot into the active Process:
+
+(a) Global hotkey (Ctrl+Alt+Shift+S, hardcoded — no customization UI yet)
+    ↓ OS-level, no window involved
+tauri_plugin_global_shortcut's handler (registered in .setup(), lib.rs)
+    ↓
+hotkey::handle_capture_shortcut(app)
+    ↓ reads active_process::ActiveProcessState directly
+    ↓ builds a CaptureService exactly like commands::capture does
+CaptureService::create_screenshot()        (unchanged since TASK-009)
+    ↓
+app.emit("screenshot-captured", result)     Rust-side emit, no ACL involved
+    ↓
+floating widget listens, shows a brief acknowledgment
+
+(b) Floating widget's own "Capture screenshot" button
+    ↓
+Widget.tsx (its own window/React tree)
+    ↓
+createScreenshotCapture()                  features/projects/services/captures.ts
+    ↓ invoke("create_screenshot_capture")   — the exact same frontend call
+    ↓                                         CreateCaptureDialog (TASK-009)
+    ↓                                         makes from the main window
+commands::capture::create_screenshot_capture   → CaptureService::create_screenshot()
+```
+
+**Two Tauri windows, not one** — `tauri.conf.json` now declares a second
+window, `"widget"` (`url: "widget.html"`, a separate Vite/HTML entry —
+see §2 — small, `alwaysOnTop`, `decorations: false`, `skipTaskbar: true`,
+visible by default). Tauri windows are separate webview processes with
+**no shared JS memory**: the widget cannot read the main window's
+`stores/activeProcess.tsx` React Context directly, which is the reason
+the next piece exists.
+
+**Cross-window active-process sync** (`active_process.rs` +
+`commands::active_process`): a small Rust-managed
+`ActiveProcessState(Mutex<Option<ActiveProcessInfo>>)` is the mechanism
+that bridges the two windows. `sync_active_process` (called by the main
+window's `stores/activeProcess.tsx`, superseding TASK-010's narrower
+`set_active_process_tray` — now carrying full `process_id`/`project_id`,
+not just display names, since the widget needs to *act* on the active
+Process, not only show it) updates this state, updates the tray label
+(unchanged from TASK-010), and — the new part — broadcasts an
+`active-process-changed` event to every window via `AppHandle::emit`
+(Rust-side; not gated by the frontend ACL, since only crossing *into* the
+webview via IPC is). `get_active_process` lets a window that wasn't open
+for the last change (e.g. the widget, just reopened) pull the current
+value on mount instead of waiting for the next push. Never persisted —
+resets to `None` every launch, same as the store it mirrors.
+
+**The widget window** (`src/widget/`, see §2): its own small React tree,
+reusing `App.css`'s design tokens/`.button` styles but with its own
+minimal layout (`widget.css`). On mount: fetches the active Process
+(`getActiveProcess`), then subscribes to `onActiveProcessChanged` and
+`onScreenshotCaptured` (both thin wrappers around
+`@tauri-apps/api/event`'s `listen`, in `services/activeProcess.ts` and
+`features/projects/services/captures.ts` respectively — components still
+never call a raw Tauri API directly, the same rule §4 established for
+`invoke`, now extended to `listen`). Shows the active Process's name (or
+a "no active process" empty state, button disabled), a "Capture
+screenshot" button that calls `createScreenshotCapture` with a fixed
+title (`"Screenshot"` — no dialog, matching the hotkey's own no-dialog
+behavior so both produce the same kind of Capture), a loading state
+while capturing, and inline success/error feedback. Its own "×" button
+calls a dedicated `hide_widget` command rather than the raw
+`@tauri-apps/api/window` API — sidesteps needing
+`core:window:allow-hide` in its capability entirely, since app-defined
+commands aren't ACL-gated (see §13). Showing it again is tray-only (the
+"Toggle Widget" menu item, `tray.rs`) — the widget never shows itself.
+
+**The global shortcut** (`hotkey.rs`): registered once from `.setup()`
+via `tauri_plugin_global_shortcut`, handled **entirely in Rust** — no
+window's JS is involved in triggering a capture this way. A global
+hotkey has no "requesting window" the way a button click does, and every
+dependency the handler needs (`ActiveProcessState`, the same
+`CaptureService::create_screenshot` §22 already built) is directly
+reachable from Rust, so routing through IPC/a window's event loop would
+have added a hop for no benefit. If there's no active Process, the
+handler emits a `no_active_process` result instead of silently doing
+nothing. **Registration failure is non-fatal** — logged, not propagated
+with `?` — a deliberate fix made during this task after the originally-
+chosen shortcut turned out to already be claimed by another application
+on the verification machine and took the entire app down at startup
+before the fix; see DECISIONS.md. No hotkey-customization UI exists —
+the combination is a hardcoded constant (`hotkey::shortcut()`).
+
+**Close-to-tray now applies to both windows.** TASK-010's
+`on_window_event` handler (hide instead of close) was left as a single,
+app-wide handler rather than branching by window label — on
+reflection, both windows should behave the same way here: neither the
+main window nor the widget should ever be truly destroyed while GoLive
+is running, since either could be the user's only visible way back into
+the app. (TASK-010's own docs had flagged this as something to revisit
+once a second window existed — this is that reconsideration, landing on
+"no branch needed" rather than the branch it anticipated.)
+
+**Errors:** none new. The widget's own capture button surfaces failures
+through the existing `getErrorMessage()` convention, same as
+`CreateCaptureDialog`. The hotkey path (no window to show a normal error
+UI in) converts an `AppError` to its safe `.to_string()` and carries it
+in the `screenshot-captured` event's `error` variant instead.
+
+**Testing:** 124 Rust tests (was 119) — 5 new: `active_process::tests`
+(state starts empty, set/get round-trips, `None` clears a previous
+value) and `hotkey::tests` (the `CaptureResult` enum's exact JSON tag
+shape — pinning the wire contract `services/captures.ts`'s
+`onScreenshotCaptured` parses — and that `shortcut()` is deterministic).
+No new tests for `tray.rs`'s widget-toggle menu logic or the
+event-emitting side of `sync_active_process` — both call real
+native/Tauri APIs that (like the tray icon itself, TASK-010) can't be
+constructed outside a running app; covered by manual verification
+instead. UI-flow verification (main window: selecting/creating/renaming/
+deleting a Process still calls `sync_active_process` with the correct,
+now-fuller `{ process_id, process_name, project_id, project_name }`
+shape; no regressions in any existing Project/Process/Capture flow) used
+the same mocked-`window.__TAURI_INTERNALS__.invoke` dev-server approach
+as every prior task. The widget page (`widget.html`) was separately
+loaded in a browser tab and exercised directly — confirmed it renders
+its "no active process" empty state correctly (capture button correctly
+disabled) and that its hide button calls `hide_widget` — but the
+"active Process shown → capture succeeds" path could not be directly
+click-tested in this harness: the widget's initial fetch races the
+mock's injection (there is no retry affordance to force a re-fetch after
+the fact, unlike the main app's "Retry" button), and by the time a mock
+can be installed the effect has already run and lost the race. This is a
+testing-harness limitation, not a functional gap — both of that path's
+constituent operations (reading the active-Process shape, calling
+`createScreenshotCapture`) are exercised elsewhere (the main window's
+regression pass; TASK-009's exhaustive screenshot verification).
+
+**Native verification, not simulated:** the compiled `golive.exe` was
+launched and, via a Win32 `EnumWindows` enumeration (since no desktop
+UI-automation tool can click the native UI directly, the standing
+limitation §22/§23 already record), both windows were confirmed to exist
+and be visible simultaneously (`"GoLive"` and `"GoLive Capture"`). The
+global shortcut was triggered for real — not simulated — via low-level
+`keybd_event` Win32 input (not `SendKeys`, which only targets the
+foreground window and would not reach a true OS-level global hotkey);
+the app stayed running and responsive afterward, and (since no active
+Process was set for that run) correctly created no capture, confirming
+the `no_active_process` path executes without crashing. Close-to-tray
+was re-verified with both windows present, the same graceful-close-
+survives-as-same-PID method §23 used. See PROJECT_STATE.md for the full
+record, including the startup-crash bug this verification pass actually
+caught and how it was fixed.
+
 ## Status
 
-Reflects the state after **TASK-009** (real screenshot capture: a
-Screenshot Capture now has an actual PNG behind it, captured from the
-primary Windows display and stored under the application-data directory
-— still no screen/microphone recording, floating widget, global hotkeys,
+Reflects the state after **TASK-011** (global hotkey and floating
+capture widget — a Screenshot can now be captured from anywhere in
+Windows, into the active Process, without switching to GoLive's main
+window — still no quick markers, screen/microphone recording,
 transcription, AI, or documentation-generation functionality; Note and
 Recording Captures remain metadata only). See
 [PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current

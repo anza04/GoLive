@@ -1,13 +1,17 @@
+mod active_process;
 mod commands;
 mod db;
 mod errors;
+mod hotkey;
 mod media;
 mod models;
 mod native;
 mod repositories;
 mod services;
+mod tray;
 
 use tauri::Manager;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -44,7 +48,62 @@ pub fn run() {
 
             app.manage(db_service);
             app.manage(media_storage);
+            app.manage(active_process::ActiveProcessState::default());
+
+            // System tray (TASK-010): built last, once the state above
+            // is settled, so its "Open GoLive" handler always has a
+            // fully initialized app to reopen into.
+            let tray_handles = tray::build(app)?;
+            app.manage(tray_handles);
+
+            // Global keyboard shortcut (TASK-011): registered here, not
+            // as a top-level `.plugin(...)` before `.setup()`, matching
+            // the plugin's own documented pattern. `hotkey::shortcut()`
+            // is a small, pure, deterministic constructor — called fresh
+            // on each side (handler comparison, registration) rather
+            // than captured/cloned, since there's nothing to save by
+            // sharing one instance.
+            //
+            // Registration failure (most likely: another already-running
+            // application claimed the same combination first) is logged
+            // and otherwise ignored — it must NOT prevent GoLive from
+            // starting. This was not a theoretical concern: it was
+            // caught during this task's own manual verification, when
+            // the originally-chosen shortcut turned out to already be
+            // claimed on the test machine and (before this was fixed)
+            // took the entire application down at startup.
+            if let Err(err) = app.handle().plugin(
+                tauri_plugin_global_shortcut::Builder::new()
+                    .with_handler(|app, pressed, event| {
+                        if event.state() == ShortcutState::Pressed && pressed == &hotkey::shortcut() {
+                            hotkey::handle_capture_shortcut(app);
+                        }
+                    })
+                    .build(),
+            ) {
+                eprintln!("[golive] failed to initialize the global-shortcut plugin: {err}");
+            } else if let Err(err) = app.global_shortcut().register(hotkey::shortcut()) {
+                eprintln!(
+                    "[golive] failed to register the global capture shortcut (already in use by \
+                     another application?): {err}"
+                );
+            }
+
             Ok(())
+        })
+        // Hides a window instead of letting it close — applies to both
+        // "main" and "widget" (TASK-011): neither should ever be truly
+        // destroyed while the app is running, since either one might be
+        // the user's only visible way back into a hidden GoLive. The
+        // tray's "Quit" item (see `tray::build`) is the one real exit,
+        // plus a normal window-manager force-close.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Err(err) = window.hide() {
+                    eprintln!("[golive] failed to hide window {} on close: {err}", window.label());
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::foundation::check_foundation_status,
@@ -66,6 +125,9 @@ pub fn run() {
             commands::capture::delete_capture,
             commands::capture::create_screenshot_capture,
             commands::capture::get_capture_media,
+            commands::active_process::sync_active_process,
+            commands::active_process::get_active_process,
+            commands::widget::hide_widget,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

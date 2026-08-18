@@ -58,7 +58,7 @@ outside the main window, in every modality the product promises
 work begins. Capture quality/breadth is the input AI structuring (M2)
 depends on, so it comes first.
 
-### TASK-010 — Background persistence, system tray, and the active-process store
+### TASK-010 — Background persistence, system tray, and the active-process store ✅ DONE
 
 **Depends on:** TASK-006 (Project Workspace), TASK-007 (Process
 selection).
@@ -94,7 +94,7 @@ the main window being open or focused.
 for real; selecting a Process updates the store and the tray reflects
 it; existing Project/Process/Capture functionality is unaffected.
 
-### TASK-011 — Global hotkey and floating capture widget (screenshot only)
+### TASK-011 — Global hotkey and floating capture widget (screenshot only) ✅ DONE
 
 **Depends on:** TASK-010 (active-process store, background persistence),
 TASK-009 (real screenshot capture pipeline).

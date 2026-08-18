@@ -80,7 +80,9 @@ export function ProjectWorkspace({
 
       <div className="workspace-content">
         {activeTab === "overview" && <ProjectOverview project={project} />}
-        {activeTab === "processes" && <ProcessesView projectId={project.id} />}
+        {activeTab === "processes" && (
+          <ProcessesView projectId={project.id} projectName={project.name} />
+        )}
       </div>
 
       {editOpen && (
