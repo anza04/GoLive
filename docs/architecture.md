@@ -120,6 +120,9 @@ src-tauri/
     active_process.rs         ActiveProcessState: cross-window active-
                                Process mirror (see §24)
     hotkey.rs                  global-shortcut registration + handler (§24)
+    recording.rs                 RecordingState: in-progress-recording
+                                   handle, bridges the two-phase start/
+                                   stop commands (see §26)
     commands/
       foundation.rs           check_foundation_status
       storage.rs               get_local_storage_status
@@ -132,13 +135,15 @@ src-tauri/
                                     (§23, §24 — supersedes TASK-010's
                                     commands::tray)
       widget.rs                   hide_widget (§24)
+      recording.rs                 start_recording_capture,
+                                     stop_recording_capture (§26)
     db/
       mod.rs                   DbService: init, pool access
       pool.rs                  r2d2 pool construction + PRAGMAs
       migrations.rs            migration runner
     media/
       mod.rs                   MediaStorage: captured-media filesystem
-                                boundary (see §22)
+                                boundary (see §22, extended §26 for video)
     models/
       project.rs                Project struct (see §18)
       process.rs                  Process struct + ProcessStatus enum (§20)
@@ -147,6 +152,8 @@ src-tauri/
       mod.rs                   native/platform-specific functionality root
       screenshot.rs            ScreenshotEngine trait +
                                 WindowsScreenshotEngine (see §22)
+      recording.rs              RecordingEngine/RecordingHandle traits +
+                                  WindowsRecordingEngine (see §26)
     repositories/
       storage_status.rs        StorageStatusRepository trait +
                                 SqliteStorageStatusRepository
@@ -163,7 +170,8 @@ src-tauri/
                                    generation, project-existence check (§20)
       capture.rs                   CaptureService: validation, id/timestamp
                                     generation, process-existence check,
-                                    screenshot/media orchestration (§21, §22)
+                                    screenshot/media orchestration (§21,
+                                    §22), recording finalization (§26)
     tray.rs                      system tray icon + menu (see §23, §24)
 ```
 
@@ -292,11 +300,11 @@ same trait, without changing the command layer or the UI.
 
 ## 7. File storage boundary
 
-**PARTIALLY CURRENT (TASK-009).** Screenshot PNGs are the first real
-occupant: `media::MediaStorage` (see §22) owns
+**PARTIALLY CURRENT (TASK-009, extended TASK-013).** Screenshot PNGs
+were the first real occupant; Recording MP4s (see §26) are the second —
+both live in `media::MediaStorage`, which owns
 `<app_data_dir>/captures/`, a sibling of `<app_data_dir>/database/`.
-Recordings, audio, project files, and exported documents remain
-**FUTURE**.
+Audio, project files, and exported documents remain **FUTURE**.
 
 **Rule:** native filesystem operations live in the Rust/native layer
 (behind `MediaStorage`, analogous to the repository boundary in §6),
@@ -324,10 +332,11 @@ introduced by this task.
 
 ## 9. Native Windows functionality boundary
 
-**PARTIALLY CURRENT (TASK-009, TASK-011).** Screenshot capture
-(`native::screenshot::ScreenshotEngine`, §22) and the global capture
-shortcut (`hotkey.rs`, §24) are real. Screen recording and microphone
-capture remain **FUTURE**.
+**PARTIALLY CURRENT (TASK-009, TASK-011, TASK-013).** Screenshot capture
+(`native::screenshot::ScreenshotEngine`, §22), the global capture
+shortcut (`hotkey.rs`, §24), and screen recording
+(`native::recording::RecordingEngine`, §26) are real. Microphone capture
+remains **FUTURE**.
 
 **Rule:** this functionality is implemented as Rust/Tauri services exposed
 through commands. React consumes a clean application API (e.g. "start
@@ -510,6 +519,7 @@ working one just to shrink the list.
 | `uuid` (`v4`) | Generates `Project` ids (§18). Already an indirect dependency of the toolchain; added as a direct one now that our own code (`ProjectService`) actually calls it. |
 | `xcap` (`image` feature) | TASK-009: captures the primary Windows display and encodes it as PNG (`native::screenshot::WindowsScreenshotEngine`, §22). Chosen over hand-rolling a GDI capture directly against the `windows` crate — `xcap` already wraps that (plus macOS/Linux backends we don't use, but don't pay extra for either — they're behind per-platform `[target.'cfg(...)'.dependencies]` and never compiled into the Windows build) behind a small, actively maintained API (`Monitor::all()` / `capture_image()`) that does exactly what this task needs and nothing more; it re-exports the `image` crate it already depends on (`xcap::image`), so no separate `image` dependency was added. `xcap`'s optional Windows-Graphics-Capture backend (`wgc` feature, extra Direct3D/DXGI bindings) was deliberately **not** enabled — the default GDI backend is the simplest reliable option for "capture the primary display," and TASK-009 explicitly scopes to that one mode (see DECISIONS.md). |
 | `tauri-plugin-global-shortcut` (target `cfg(any(macos, windows, linux))`, matching the plugin's own documented Cargo.toml line) | TASK-011: registers and handles the global capture keyboard shortcut (`hotkey.rs`, §24). Tauri's own first-party plugin for this — no alternative crate was evaluated, the same way `tray-icon` (TASK-010) needed no alternatives-considered analysis. Only its Rust API is used (`GlobalShortcutExt`, `Builder::with_handler`); the JS-side `@tauri-apps/plugin-global-shortcut` package was deliberately not added, since no window's frontend registers, unregisters, or otherwise touches shortcuts — see DECISIONS.md. |
+| `windows-capture` | TASK-013: records the primary Windows display and encodes it to MP4 (`native::recording::WindowsRecordingEngine`, §26). Wraps the Windows Graphics Capture API plus a hardware-accelerated Media Foundation video encoder — no external runtime (no bundled ffmpeg) required. Chosen over extending `xcap` (already a dependency) with its own `video_recorder()`, which delivers only raw, unencoded frames and was still an upstream work-in-progress at the time this was written — pairing it with a *separate* encoding crate would have meant evaluating and adding two new dependencies working together instead of one that already does both; see DECISIONS.md for the full comparison, including why a bundled-ffmpeg approach was rejected. |
 
 **Dev-only:** `tempfile` — isolated temp directories for the database
 tests (§17), never touching the real per-user app-data directory.
@@ -1592,11 +1602,12 @@ window/tray, only for a real web browser tab).
 
 ## 24. Global hotkey and floating capture widget (TASK-011)
 
-**CURRENT.** The first step to actually deliver on the product's core
-premise — capturing evidence "while users are performing their actual
-work," per README.md — rather than requiring the user to switch into
-GoLive first. Screenshot only; scope explicitly excludes recording,
-audio, and quick markers (those are later roadmap.md steps).
+The first step to actually deliver on the product's core premise —
+capturing evidence "while users are performing their actual work," per
+README.md — rather than requiring the user to switch into GoLive first.
+Screenshot only at the time this was built; scope explicitly excluded
+recording, audio, and quick markers (quick markers followed immediately
+as §25/TASK-012; recording and audio remain later roadmap.md steps).
 
 ```
 Two ways to trigger a screenshot into the active Process:
@@ -1745,13 +1756,281 @@ survives-as-same-PID method §23 used. See PROJECT_STATE.md for the full
 record, including the startup-crash bug this verification pass actually
 caught and how it was fixed.
 
+## 25. Quick markers (TASK-012)
+
+The near-zero-friction way to flag a moment during live
+work without filling in a title/description — the "markers" README.md's
+product description names as distinct from full notes. Deliberately the
+smallest possible step: **no backend change at all.** TASK-008's generic
+`create_capture` command/`CaptureService::create` already accepted an
+arbitrary `title`/`description` for a `note`-type Capture; a marker is
+simply that same operation called with the title/description decided by
+the frontend instead of a human typing them into a dialog.
+
+```
+Widget's "Add marker" button
+    ↓
+Widget.tsx: handleMarker()
+    ↓
+createQuickMarker(processId)          features/projects/services/captures.ts
+    ↓ builds { captureType: "note", title: "Marker — <formatDate(now)>", description: "" }
+createCapture(...)                    the exact same call CreateCaptureDialog uses (TASK-008)
+    ↓ invoke("create_capture")        — command/service/repository entirely unchanged
+commands::capture::create_capture → CaptureService::create()
+```
+
+**`createQuickMarker`** (`features/projects/services/captures.ts`) is a
+thin frontend-only wrapper: it generates the title as
+`` `Marker — ${formatDate(Date.now())}` `` — reusing the exact same
+`utils/formatDate` helper every other displayed timestamp in the app
+already uses, so a marker's title reads the same way any other date text
+in GoLive does — and an empty description, then calls the existing
+`createCapture`. No new Tauri command, no new Rust code, no new
+`AppError` variant, no migration. A marker is, from the moment it's
+created, an ordinary `note`-type Capture: it appears in the existing
+Captures list/detail like any other Note, and is edited (title,
+description, even its type) through the existing generic Edit flow —
+there is no special "marker" concept anywhere below the frontend
+service layer, and no way to tell a marker apart from a hand-created
+Note capture once it exists (by design — see DECISIONS.md).
+
+**Surfaced only from the floating widget** (`src/widget/Widget.tsx`), as
+a second button, "Add marker", next to TASK-011's "Capture screenshot" —
+same disabled-when-no-active-Process rule, same inline success/error
+feedback pattern, mutually exclusive with an in-flight screenshot
+capture (one shared `busy` flag disables both buttons while either
+request is in flight, to keep feedback from one action being overwritten
+by the other). No global hotkey for markers — the roadmap step allowed
+one optionally, but a second button already meets its "near-zero-
+friction, one click, no dialog" goal without adding another
+possibly-conflicting global shortcut registration (see §24's own
+hotkey-collision story). The widget window (`tauri.conf.json`) grew
+slightly taller (170px → 210px) to fit the second button without
+crowding.
+
+**Errors:** none new — a failed marker creation surfaces through the
+same `getErrorMessage()`/inline-feedback convention the screenshot
+button already used.
+
+**Testing:** no new Rust tests — no Rust code changed; the full 124-test
+suite continues to pass. No new frontend automated tests (this project
+has no frontend test runner — see §2/README.md); verified instead by
+directly invoking the compiled `createQuickMarker` module through the
+Vite dev server with a mocked `window.__TAURI_INTERNALS__.invoke` (the
+same technique every prior task's UI verification has used), confirming
+it calls `create_capture` with exactly `{ process_id, capture_type:
+"note", title: "Marker — <formatted timestamp>", description: "" }` and
+correctly maps the mocked response back into a `Capture`. The widget's
+"no active process" empty state was loaded directly (`widget.html`) and
+confirmed to render both buttons, both correctly `disabled`. The
+"active Process set → click Add marker → Capture appears" path could
+not be click-tested end-to-end in this harness, for the identical
+reason §24 already documents for the screenshot button (the widget's
+on-mount fetch races mock injection with no retry affordance) — not a
+new gap, the same one, now covering a second button. Given `createCapture`
+itself is exhaustively covered (TASK-008's 16 service tests plus its own
+full mocked-IPC UI pass) and this task added no backend surface for it
+to call into, this is judged sufficient. The compiled `golive.exe` was
+rebuilt and relaunched; both windows were confirmed to render at the new
+widget size and the app started cleanly (no crash), matching §24's
+native-verification standard.
+
+## 26. Screen recording capture engine and storage (TASK-013)
+
+**CURRENT.** Gives Recording Captures real video media, the same way
+TASK-009 gave Screenshot Captures a real PNG — backend/native layer
+first, UI deliberately minimal (a Start/Stop pair, no in-progress
+indicator, no playback), matching PROJECT_STATE.md's own risk-reduction
+flag for this feature ("highest risk — flagged for incremental
+proof-of-concept development"). Full recording UX (in-progress
+indicator reachable from the widget, video playback in `CaptureDetail`)
+is TASK-014.
+
+```
+Two-phase flow (unlike screenshot's one-shot create_screenshot_capture):
+
+CreateCaptureDialog, Type = Recording
+    ↓ "Start recording" click
+startRecordingCapture({ processId, title, description })
+    ↓ invoke("start_recording_capture")
+commands::recording::start_recording_capture
+    ↓ CaptureService::validate_recording_start()   (shared with create/create_screenshot)
+    ↓ generates the Capture id up front
+    ↓ media.video_path(id)                          <captures_dir>/<id>.mp4
+    ↓ WindowsRecordingEngine::start(path)            returns immediately
+    ↓ stored in RecordingState (Tauri-managed, one recording at a time)
+    ← RecordingStartedInfo { id, process_id, title }  (not a Capture — no row yet)
+
+    ... real capture continues on windows_capture's own background thread ...
+
+    ↓ "Stop recording" click
+stopRecordingCapture()
+    ↓ invoke("stop_recording_capture")
+commands::recording::stop_recording_capture
+    ↓ RecordingState::take()                         the stored handle + metadata
+    ↓ handle.stop()                                   blocks until the MP4 is finalized
+    ↓ CaptureService::finalize_recording(id, ...)     creates the Capture row, using
+    ←  Capture (type: "recording")                    the SAME id the video was written under
+```
+
+**Native recording engine** (`native::recording`, mirroring
+`native::screenshot`'s trait-object shape): `RecordingEngine::start(path)
+-> Box<dyn RecordingHandle>` starts recording immediately and returns;
+`RecordingHandle::stop(self: Box<Self>)` blocks until the file is fully
+finalized and closed. `WindowsRecordingEngine` implements this using the
+`windows-capture` crate (Windows Graphics Capture API +
+hardware-accelerated Media Foundation video encoding) — **not** `xcap`'s
+own `video_recorder()` (still an upstream work-in-progress at the time
+this was written, and delivers only raw frames with no encoder attached)
+and not a separately-chosen encoding crate/bundled ffmpeg binary paired
+with it. `windows-capture` encodes directly to MP4 (H.264, default
+settings) with no external runtime dependency — see DECISIONS.md for the
+full comparison. Only the primary display is supported (`Monitor::
+primary()`) — no monitor picker, no window/area selection, no
+pause/resume, matching every scope limit TASK-009 already established
+for the single-frame case.
+
+**`media::MediaStorage` extended, not replaced** (see §7/TASK-009): PNG
+methods (`save_capture`/`read_capture`/`delete_capture`/`exists`) are
+untouched; new `video_path`/`video_exists`/`delete_video` methods are
+their MP4 counterparts, with one structural difference — there's no
+`save_video(bytes)`, because a recording's bytes are never fully in
+memory at once. The recording engine writes directly to the path
+`video_path` returns, incrementally, while the recording is in progress.
+`reconcile` (the Project/Process-cascade orphan sweep, run once at
+startup) now sweeps both `.png` and `.mp4` files — which incidentally
+also cleans up a video file left behind by a recording that was never
+stopped (e.g. the app was closed mid-recording): it has no matching
+Capture row, so it's indistinguishable from any other orphan, and the
+existing sweep removes it for free with no new code (see DECISIONS.md).
+
+**Two-phase state lives in `recording::RecordingState`, not
+`CaptureService`.** `CaptureService` is deliberately stateless — a fresh
+instance is built for every command (`commands::recording::
+capture_service`, matching `commands::capture::service`/`hotkey::
+handle_capture_shortcut`'s already-established, independently-repeated
+construction) — so an in-progress `RecordingHandle` can't live inside
+it; it wouldn't survive between the `start` and `stop` commands, two
+separate IPC calls. `RecordingState` is a small piece of Tauri-managed
+state (`app.manage(...)`, same shape as `active_process::
+ActiveProcessState`) holding at most one `InProgressRecording` at a
+time — the one system-wide recording this task supports (see
+DECISIONS.md). Its `start` method holds its internal lock for the
+*entire* validate-and-launch sequence (not just the "is one already
+running?" check), which is what actually prevents two concurrent
+`start_recording_capture` calls from both starting a real native
+recording before either notices the other.
+
+**`CaptureService` gained two recording-specific methods,** alongside a
+small refactor: `create`/`create_screenshot`'s shared
+validate-title/description-and-confirm-process-exists logic was
+extracted into a private `validate_for_create` helper (behavior
+unchanged, now shared by three callers instead of duplicated twice).
+`validate_recording_start` exposes that same validation to
+`start_recording_capture` *before* a real recording begins — so an
+invalid request never starts one that would then need to be aborted.
+`finalize_recording(id, process_id, title, description)` is
+`create_screenshot`'s mirror for the stop side: unlike every other
+creation path, it takes an **externally supplied id** (the recording
+engine already wrote `<id>.mp4` while the recording was in progress, so
+the metadata row must reuse that id, not generate a fresh one),
+confirms the video file actually exists (a defensive check — a
+recording stopped the instant after starting could plausibly produce no
+frames), and applies the same cleanup-on-metadata-failure discipline
+`create_screenshot` established for PNGs. `delete` now removes both a
+capture's PNG *and* MP4 unconditionally (both are safe no-ops when
+absent, and a Capture is never both types) rather than just the PNG.
+
+**Minimal UI, main window only** (`CreateCaptureDialog`, Type =
+Recording): title/description/type are collected *before* the primary
+button's first click starts a real recording; the button then reads
+"Stop recording" and every other field (including title/description/
+Cancel) locks until it's clicked — abandoning an in-progress recording
+via Cancel isn't offered, since nothing would ever stop it (the orphan
+sweep above is the safety net if the whole app is closed anyway). No
+widget/hotkey integration and no in-progress indicator — both TASK-014.
+
+**Errors:** none new — reuses `AppError::Capture` (native
+start/stop/encode failures, "no video file was produced") and
+`AppError::Validation` ("a recording is already in progress" / "no
+recording is in progress").
+
+**Testing:** 139 Rust tests (was 124) — 15 new: 5 `media::tests`
+(`video_path`'s shape and UUID validation, `video_exists`, `delete_video`
+incl. graceful no-op when missing, `reconcile` now removing orphaned MP4
+files too), 5 `services::capture::tests` (`validate_recording_start`
+sharing `create`'s rules, `finalize_recording` creating a Recording
+Capture under the given id / failing cleanly when no video file exists /
+cleaning up its video on a metadata-insert failure, `delete` removing
+recording media alongside metadata), and 5 `recording::tests` against a
+`FakeHandle` test double (`RecordingState::start` stores and returns
+info / rejects a second concurrent start / doesn't store anything on a
+failed start / a subsequent start succeeds after a failed one;
+`RecordingState::take` returns once then `None`). No fake `RecordingEngine`
+was needed in `services::capture`'s own tests — `finalize_recording`
+never calls a `RecordingEngine` itself, only `MediaStorage`, so writing
+a plain file to the expected path is enough to stand in for what the
+real engine would have already produced.
+
+Full UI-flow verification (Projects → Process → Captures → "+ New
+capture" → Type = Recording → title filled → "Start recording" →
+confirmed via the mocked backend that `start_recording_capture` was
+called with the exact expected shape, the dialog's title/description/
+type fields and Cancel button all become `disabled`, and the button
+relabels to "Stop recording" → clicked → confirmed `stop_recording_capture`
+was called, the dialog closed, and the new Recording Capture appeared
+in the list/detail pane exactly like any other capture-creation flow)
+was verified against the Vite dev server with the same
+mocked-`window.__TAURI_INTERNALS__.invoke` approach every prior task has
+used, extended with `start_recording_capture`/`stop_recording_capture`
+handlers (the mock also rejects a second concurrent start, mirroring the
+real backend).
+
+**Native verification, not simulated — the real risk this task existed
+to de-risk:** `cargo test --release -- --ignored
+record_primary_display_smoke_test` (the `#[ignore]`d real-capture test,
+same convention as `native::screenshot`'s own smoke test) was run
+explicitly on this session's real Windows desktop and **passed** — a
+real ~2-second recording of the primary display produced a non-empty,
+valid MP4. A further one-off spot-check
+(`examples/recording_spotcheck.rs`, written temporarily and deleted
+before this task was considered complete, with `lib.rs`'s `native`/
+`errors` modules briefly widened to `pub` to reach them directly — same
+temporary-widening convention TASK-004 through TASK-009 established)
+recorded ~4 real seconds of this session's actual desktop to a
+non-temp-dir path for direct inspection: the output was **156,431
+bytes**, and its first bytes were verified byte-for-byte to be a
+well-formed ISO-BMFF/MP4 box header (`00 00 00 18` = a 24-byte box
+length, followed by the ASCII tag `ftyp`, followed by the major-brand
+`mp42`) — this is definitive evidence of a genuine, correctly-encoded
+MP4 container, not empty output or garbage bytes. The temporary example
+file and the temporary `pub` widening were both removed immediately
+afterward; `git status` was checked to confirm no stray files remained.
+
+The freshly rebuilt `golive.exe` was also launched and, via the same
+Win32 `EnumWindows` enumeration §22/§23/§24 established, both windows
+were confirmed to render correctly and the app started with no crash.
+What was **not** verified: an actual end-to-end "click Start recording
+in the native UI → wait → click Stop → see the Capture in the list"
+pass through the compiled app's own window, for the same
+no-desktop-UI-automation limitation every prior task has recorded — the
+mocked-IPC dev-server pass above proves the *frontend* wiring, and the
+native smoke test above independently proves the *native engine*;
+between the two, this is judged sufficient without overclaiming a
+native-UI click-through that couldn't actually be performed here. A
+developer with an interactive desktop session should still do one full
+unassisted pass through `golive.exe` (start a recording, stop it,
+confirm the video file at `%APPDATA%\com.golive.app\captures\<id>.mp4`
+plays correctly in a real media player) before relying on this in a
+real engagement.
+
 ## Status
 
-Reflects the state after **TASK-011** (global hotkey and floating
-capture widget — a Screenshot can now be captured from anywhere in
-Windows, into the active Process, without switching to GoLive's main
-window — still no quick markers, screen/microphone recording,
-transcription, AI, or documentation-generation functionality; Note and
-Recording Captures remain metadata only). See
-[PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
-implementation status.
+Reflects the state after **TASK-013** (screen recording capture engine
+and storage — a Recording Capture now has a real, playable MP4 file
+behind it, the same way TASK-009 gave Screenshot Captures a real PNG;
+the UI is deliberately minimal, a Start/Stop pair with no in-progress
+indicator or playback — still no microphone audio, transcription, AI, or
+documentation-generation functionality; Note Captures other than quick
+markers remain metadata only). See [PROJECT_STATE.md](../PROJECT_STATE.md)
+for the authoritative current implementation status.

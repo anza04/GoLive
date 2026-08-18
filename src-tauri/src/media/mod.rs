@@ -18,6 +18,12 @@ use uuid::Uuid;
 
 const CAPTURES_SUBDIR: &str = "captures";
 const PNG_EXTENSION: &str = "png";
+/// Container extension for Recording captures (TASK-013) — MP4, chosen
+/// alongside `native::recording::WindowsRecordingEngine`'s encoder
+/// (H.264 in an MP4 container via Windows' own Media Foundation) — see
+/// DECISIONS.md.
+const MP4_EXTENSION: &str = "mp4";
+const MEDIA_EXTENSIONS: [&str; 2] = [PNG_EXTENSION, MP4_EXTENSION];
 
 /// Cheap to clone (one `PathBuf`) — same "construct fresh per command,
 /// backed by shared state" shape as `DbPool` (see `db::DbPool`), so
@@ -74,6 +80,42 @@ impl MediaStorage {
         }
     }
 
+    /// Resolves the on-disk path a Recording's video should be written
+    /// to/read from: `<captures_dir>/<capture_id>.mp4`. Unlike the PNG
+    /// methods above (which take a byte buffer already fully in memory),
+    /// there is no `save_video`/`read_video` pair here — a recording is
+    /// written incrementally, frame by frame, by
+    /// `native::recording::WindowsRecordingEngine` while it's in
+    /// progress, so the *path* is what the caller needs, not a
+    /// save/read round trip. Same UUID validation as `path_for` — the
+    /// entire path-traversal defense (see there).
+    pub fn video_path(&self, capture_id: &str) -> Result<PathBuf, AppError> {
+        self.path_for_extension(capture_id, MP4_EXTENSION)
+    }
+
+    /// Whether a video file exists for `capture_id` — used by
+    /// `CaptureService::finalize_recording` to confirm the recording
+    /// engine actually produced a file before creating the Capture
+    /// metadata row (see docs/architecture.md).
+    pub fn video_exists(&self, capture_id: &str) -> bool {
+        self.video_path(capture_id).map(|path| path.exists()).unwrap_or(false)
+    }
+
+    /// Deletes the video for `capture_id` — the Recording counterpart to
+    /// `delete_capture`, with the identical "missing file is already-
+    /// deleted success" behavior. Called unconditionally alongside
+    /// `delete_capture` by `CaptureService::delete` (a Capture is never
+    /// both a screenshot and a recording, so at most one of the two
+    /// calls ever finds a real file to remove).
+    pub fn delete_video(&self, capture_id: &str) -> Result<(), AppError> {
+        let path = self.video_path(capture_id)?;
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(AppError::from(err)),
+        }
+    }
+
     /// Whether a media file exists for `capture_id`. Infallible by
     /// design — the same convention as `std::path::Path::exists`, which
     /// itself swallows I/O errors and reports `false`. An invalid id
@@ -95,14 +137,19 @@ impl MediaStorage {
         self.path_for(capture_id).map(|path| path.exists()).unwrap_or(false)
     }
 
-    /// Deletes every `.png` file in the captures directory whose filename
-    /// stem is not present in `known_capture_ids`. This is the
+    /// Deletes every `.png`/`.mp4` file in the captures directory whose
+    /// filename stem is not present in `known_capture_ids`. This is the
     /// media-storage cleanup boundary the Project/Process cascade
     /// limitation relies on (see docs/architecture.md, "Cascade media
     /// cleanup", and `services::capture::CaptureService::reconcile_media`,
-    /// its only caller). Returns the number of orphaned files removed.
-    /// An empty/missing captures directory is not an error — there is
-    /// simply nothing to reconcile yet.
+    /// its only caller) — and, since TASK-013, also the safety net for an
+    /// in-progress recording whose `stop_recording_capture` never ran
+    /// (e.g. the app was closed mid-recording): the video file it left
+    /// behind has no matching Capture row, so the next startup sweep
+    /// removes it the same way it would any other orphan. Returns the
+    /// number of orphaned files removed. An empty/missing captures
+    /// directory is not an error — there is simply nothing to reconcile
+    /// yet.
     pub fn reconcile(&self, known_capture_ids: &HashSet<String>) -> Result<usize, AppError> {
         let entries = match std::fs::read_dir(&self.captures_dir) {
             Ok(entries) => entries,
@@ -113,7 +160,11 @@ impl MediaStorage {
         let mut removed = 0;
         for entry in entries {
             let path = entry?.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some(PNG_EXTENSION) {
+            let is_media_extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| MEDIA_EXTENSIONS.contains(&ext));
+            if !is_media_extension {
                 continue;
             }
             let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -134,16 +185,24 @@ impl MediaStorage {
         Ok(removed)
     }
 
-    /// Resolves the safe on-disk path for `capture_id`. Validates the id
-    /// is a well-formed UUID before doing anything filesystem-related —
-    /// the *only* path-safety check this module needs, since a valid
-    /// UUID string can contain nothing but hex digits and hyphens, making
-    /// path traversal (`../`, an absolute path, an arbitrary filename)
-    /// structurally impossible regardless of what a caller passes in
-    /// (see docs/architecture.md, "Safe media access").
+    /// Resolves the safe on-disk path for `capture_id`'s PNG. Validates
+    /// the id is a well-formed UUID before doing anything
+    /// filesystem-related — the *only* path-safety check this module
+    /// needs, since a valid UUID string can contain nothing but hex
+    /// digits and hyphens, making path traversal (`../`, an absolute
+    /// path, an arbitrary filename) structurally impossible regardless
+    /// of what a caller passes in (see docs/architecture.md, "Safe media
+    /// access").
     fn path_for(&self, capture_id: &str) -> Result<PathBuf, AppError> {
+        self.path_for_extension(capture_id, PNG_EXTENSION)
+    }
+
+    /// Same validation/safety as `path_for`, generalized to any media
+    /// extension this module knows about — `path_for` (PNG) and
+    /// `video_path` (MP4, TASK-013) both delegate here.
+    fn path_for_extension(&self, capture_id: &str, extension: &str) -> Result<PathBuf, AppError> {
         Uuid::parse_str(capture_id).map_err(|_| AppError::Validation("Invalid capture id.".to_string()))?;
-        Ok(self.captures_dir.join(format!("{capture_id}.{PNG_EXTENSION}")))
+        Ok(self.captures_dir.join(format!("{capture_id}.{extension}")))
     }
 }
 
@@ -260,7 +319,7 @@ mod tests {
         let orphan_id = sample_id();
         storage.save_capture(&kept_id, &[0u8]).expect("save kept");
         storage.save_capture(&orphan_id, &[0u8]).expect("save orphan");
-        // A non-PNG file must never be touched by reconciliation.
+        // A non-PNG/MP4 file must never be touched by reconciliation.
         std::fs::write(dir.path().join("captures").join("notes.txt"), b"hello").unwrap();
 
         let mut known = HashSet::new();
@@ -272,6 +331,64 @@ mod tests {
         assert!(storage.exists(&kept_id), "known capture's media must survive reconciliation");
         assert!(!storage.exists(&orphan_id), "orphaned capture's media must be removed");
         assert!(dir.path().join("captures").join("notes.txt").exists(), "non-PNG files must be left alone");
+    }
+
+    #[test]
+    fn video_path_is_the_capture_id_with_an_mp4_extension() {
+        let (dir, storage) = storage_in_temp_dir();
+        let id = sample_id();
+
+        let path = storage.video_path(&id).expect("video_path");
+
+        assert_eq!(path, dir.path().join("captures").join(format!("{id}.mp4")));
+    }
+
+    #[test]
+    fn video_path_rejects_a_malicious_id() {
+        let (_dir, storage) = storage_in_temp_dir();
+        let result = storage.video_path("../../../etc/passwd");
+        assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn video_exists_reflects_whether_the_file_is_on_disk() {
+        let (_dir, storage) = storage_in_temp_dir();
+        let id = sample_id();
+
+        assert!(!storage.video_exists(&id), "should not exist before it's written");
+        std::fs::write(storage.video_path(&id).unwrap(), b"not a real mp4, just bytes").unwrap();
+        assert!(storage.video_exists(&id), "should exist once the file is on disk");
+    }
+
+    #[test]
+    fn delete_video_removes_the_file_and_is_a_graceful_no_op_when_missing() {
+        let (_dir, storage) = storage_in_temp_dir();
+        let id = sample_id();
+        std::fs::write(storage.video_path(&id).unwrap(), b"bytes").unwrap();
+
+        storage.delete_video(&id).expect("delete");
+        assert!(!storage.video_exists(&id));
+
+        // Deleting again (nothing left to delete) must still succeed.
+        storage.delete_video(&id).expect("delete of missing video should be Ok");
+    }
+
+    #[test]
+    fn reconcile_also_removes_orphaned_mp4_files_but_keeps_known_ones() {
+        let (_dir, storage) = storage_in_temp_dir();
+        let kept_id = sample_id();
+        let orphan_id = sample_id();
+        std::fs::write(storage.video_path(&kept_id).unwrap(), b"kept").unwrap();
+        std::fs::write(storage.video_path(&orphan_id).unwrap(), b"orphaned").unwrap();
+
+        let mut known = HashSet::new();
+        known.insert(kept_id.clone());
+
+        let removed = storage.reconcile(&known).expect("reconcile");
+
+        assert_eq!(removed, 1);
+        assert!(storage.video_exists(&kept_id), "known recording's media must survive reconciliation");
+        assert!(!storage.video_exists(&orphan_id), "orphaned recording's media must be removed");
     }
 
     #[test]

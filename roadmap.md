@@ -130,7 +130,7 @@ and it shows up in that Process's Captures list next time the main
 window is opened; verified manually against the compiled app per the
 same standard TASK-009 used (real display content, not a mock).
 
-### TASK-012 — Quick markers
+### TASK-012 — Quick markers ✅ DONE
 
 **Depends on:** TASK-011 (floating widget).
 **Goal:** A near-zero-friction way to flag a moment during live work
@@ -157,7 +157,7 @@ description names as distinct from full notes.
 **Definition of done:** one click/hotkey from the widget creates a
 visible Capture with no dialog interaction required.
 
-### TASK-013 — Screen recording: capture engine and storage (no UI polish)
+### TASK-013 — Screen recording: capture engine and storage (no UI polish) ✅ DONE
 
 **Depends on:** TASK-009 (native screenshot engine, MediaStorage — this
 step extends both rather than replacing them).

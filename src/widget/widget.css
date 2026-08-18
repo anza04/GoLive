@@ -91,10 +91,17 @@ body {
   color: var(--color-text-secondary);
 }
 
-.widget__capture {
+.widget__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: auto;
+}
+
+.widget__capture,
+.widget__marker {
   width: 100%;
   justify-content: center;
-  margin-top: auto;
 }
 
 .widget__feedback {

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { formatDate } from "../../../utils/formatDate";
 
 export type CaptureType = "screenshot" | "recording" | "note";
 
@@ -94,6 +95,81 @@ export async function createScreenshotCapture(input: CreateScreenshotInput): Pro
       description: input.description,
     },
   });
+  return fromRaw(raw);
+}
+
+/**
+ * Creates a zero-friction "marker" Capture (TASK-012): a `note`-type
+ * Capture with an auto-generated title (a plain timestamp — using the
+ * same `formatDate` every other display timestamp in the app uses, so
+ * this reads the same way title text everywhere else does) and an empty
+ * description. No dialog, no required input, no new backend command —
+ * this is the exact same generic `createCapture` any hand-filled Note
+ * capture goes through; only the frontend decides the title/description
+ * on the caller's behalf (see roadmap.md TASK-012 and
+ * docs/architecture.md, "Quick markers").
+ */
+export async function createQuickMarker(processId: string): Promise<Capture> {
+  return createCapture({
+    processId,
+    captureType: "note",
+    title: `Marker — ${formatDate(Date.now())}`,
+    description: "",
+  });
+}
+
+/** Input for `startRecordingCapture` — same shape as `CreateScreenshotInput`
+ * (no `captureType` field; a recording operation always ends up
+ * `type: "recording"`). */
+export interface StartRecordingInput {
+  processId: string;
+  title: string;
+  description?: string;
+}
+
+/** What `startRecordingCapture` returns — an in-progress marker, not a
+ * full `Capture`: no metadata row exists yet, since the backend only
+ * creates one once the recording is stopped (see docs/architecture.md,
+ * "Screen recording capture engine and storage", TASK-013). */
+export interface RecordingStartedInfo {
+  id: string;
+  processId: string;
+  title: string;
+}
+
+interface RawRecordingStartedInfo {
+  id: string;
+  process_id: string;
+  title: string;
+}
+
+/**
+ * Starts recording the primary display into `input.processId` — the
+ * first half of TASK-013's two-phase recording flow. Returns
+ * immediately; the actual capture continues on the backend until
+ * `stopRecordingCapture` is called. Rejects if a recording is already
+ * in progress (system-wide — see docs/architecture.md, "one recording
+ * at a time").
+ */
+export async function startRecordingCapture(input: StartRecordingInput): Promise<RecordingStartedInfo> {
+  const raw = await invoke<RawRecordingStartedInfo>("start_recording_capture", {
+    input: {
+      process_id: input.processId,
+      title: input.title,
+      description: input.description,
+    },
+  });
+  return { id: raw.id, processId: raw.process_id, title: raw.title };
+}
+
+/**
+ * Stops the in-progress recording (blocks until the video file is fully
+ * finalized on disk) and returns the resulting Recording Capture, with
+ * its metadata row now created — the second half of TASK-013's
+ * two-phase flow. Rejects if no recording is currently in progress.
+ */
+export async function stopRecordingCapture(): Promise<Capture> {
+  const raw = await invoke<RawCapture>("stop_recording_capture");
   return fromRaw(raw);
 }
 

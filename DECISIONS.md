@@ -1080,3 +1080,241 @@ and needs recreating."
 **Consequence:** no branching logic was added; the single handler from
 TASK-010 was correct as originally written, once actually reconsidered
 rather than assumed to need a change.
+
+## TASK-012 — Quick markers
+
+**Decision:** quick markers needed **no backend change at all** — no new
+Tauri command, no new `AppError` variant, no migration. A marker is
+created by calling the existing, unmodified `create_capture`/
+`CaptureService::create` (TASK-008) with a frontend-generated title and
+an empty description.
+**Reason:** the roadmap step explicitly asked this to be inspected before
+assuming otherwise, and it held up: `CaptureType::Note` with an arbitrary
+title/empty description is already a completely ordinary, already-valid
+Capture as far as every layer below the frontend is concerned — the only
+thing distinguishing a "marker" from any other Note a user might type
+into `CreateCaptureDialog` is *who decided the title text* and *how
+little friction it took to get there*, both purely frontend concerns.
+Adding a backend "is_marker" flag or a fourth `CaptureType` variant would
+have meant a migration and touched every layer (repository, service,
+commands, frontend types) for a distinction that has no behavioral
+consequence anywhere — nothing needs to query "just the markers" for
+this MVP, and the roadmap step's own definition of done never asked for
+one.
+**Consequence:** once created, a marker is indistinguishable from a
+hand-typed Note Capture — same list, same detail view, same generic Edit
+dialog, no special badge or filter. If a future task needs to tell them
+apart (e.g. a dedicated "Markers" view), that becomes its own step with
+its own schema decision; this task deliberately didn't speculate one in.
+
+**Decision:** the marker's title is generated as `` `Marker —
+${formatDate(Date.now())}` `` — reusing the existing `utils/formatDate`
+helper — rather than a bare ISO timestamp, a counter, or asking the
+Rust backend to generate/format it.
+**Reason:** every other displayed timestamp in the app already goes
+through `formatDate` (locale-aware, human-readable); generating the
+title with anything else would make a marker's title look visibly
+different/inconsistent from how GoLive formats dates everywhere else it
+shows one. Generating it in the frontend (rather than asking a new/
+existing backend command to produce and return a formatted string) keeps
+the "no backend change" decision above intact — the backend already
+accepts an arbitrary `title` string and has no reason to know it's being
+asked for a timestamp-shaped one.
+**Consequence:** the title text is locale/timezone-dependent (same as
+every other formatted date in the app) and is a plain display string,
+not a machine-parseable value — nothing in the app parses a Capture's
+`title` back into a timestamp, so this has no downstream consequence,
+but it's worth noting if a future task ever wanted to (it should read
+`created_at` instead, which is always the real epoch-ms value).
+
+**Decision:** the marker action is surfaced as a second button in the
+floating widget ("Add marker", next to TASK-011's "Capture screenshot"),
+not as its own second global hotkey, even though the roadmap step
+explicitly allowed one.
+**Reason:** the step's definition of done only requires "one click/hotkey
+... with no dialog interaction" — a widget button already satisfies that
+with strictly less risk than a second hotkey: TASK-011 already hit a
+real registration collision with another application for the *first*
+hotkey on the verification machine, and every additional global
+shortcut GoLive registers is another chance to collide with something
+else the user has running, for a feature whose entire premise is "as
+low-friction as possible" — a hotkey that silently fails to register
+(logged, non-fatal, per TASK-011's fix) would undercut that premise more
+than not having one at all. The widget is already the always-on-top,
+reachable-without-switching-focus surface both actions need.
+**Consequence:** markers can only be created while the widget is visible
+(same reachability as the screenshot button); a dedicated marker hotkey
+remains available as a future, separately-scoped addition if real usage
+shows the widget alone isn't fast enough.
+
+**Decision:** the widget's screenshot and marker actions share one
+`busy` flag (`capturing || marking`) that disables *both* buttons while
+either request is in flight, rather than letting them run independently.
+**Reason:** the widget has exactly one feedback line (`widget__feedback`)
+shared by both actions; letting a screenshot and a marker capture run
+concurrently could have one action's result overwrite the other's
+feedback message before the user reads it, with no way to tell which
+outcome belongs to which button. The widget is small and single-purpose
+enough that "one capture action at a time" is not a meaningful
+limitation in practice.
+**Consequence:** clicking one button while the other is mid-flight does
+nothing (both are `disabled`) rather than queuing or running in
+parallel; a future redesign with per-action feedback could relax this if
+it ever becomes a real friction point.
+
+## TASK-013 — Screen recording capture engine and storage
+
+**Decision:** screen recording is implemented with the `windows-capture`
+crate (Windows Graphics Capture API + its own hardware-accelerated Media
+Foundation video encoder), not by extending `xcap` (already a
+dependency, used for screenshots) with its own `video_recorder()`, and
+not by pairing raw frames from either with a separately-chosen encoding
+crate or a bundled `ffmpeg` binary.
+**Reason:** three real options were weighed. (1) `xcap`'s
+`video_recorder()` delivers only raw, unencoded frames over a channel —
+still documented upstream as work-in-progress at the time this was
+written — so using it would still require *choosing and integrating a
+second crate* to actually produce a video file, doubling the
+new-dependency surface for one feature. (2) Bundling `ffmpeg` (as a
+subprocess or via an FFI binding crate) would work but pulls in a large,
+separately-licensed external binary/toolchain for a Windows-only app
+that already has a first-party, OS-native encoding path available —
+exactly the kind of unnecessary footprint this project's dependency
+philosophy (§15) says to avoid. (3) `windows-capture` captures *and*
+encodes in one crate, using Windows' own Media Foundation (no external
+runtime, no bundled binary, hardware-accelerated), with a small, already
+fairly widely used API (`GraphicsCaptureApiHandler`, `VideoEncoder`).
+**Consequence:** `native::recording` depends on one new crate instead of
+two, produces MP4/H.264 with default encoder settings (no bitrate/
+frame-rate tuning was attempted — TASK-013's scope is "prove the
+pipeline works," not "tune recording quality," which can be revisited
+later if real usage shows a need), and inherits `windows-capture`'s own
+maintenance/API-stability risk in exchange for not maintaining an
+encoding integration ourselves.
+
+**Decision:** at most one recording is supported system-wide at a time —
+no per-Process, per-window, or queued recordings — enforced by
+`recording::RecordingState` rejecting a second `start_recording_capture`
+call while one is already in progress.
+**Reason:** the product's live-capture workflow is "a consultant
+documents one process at a time"; nothing in the current UI (a single
+Start/Stop pair in one dialog) or the roadmap's TASK-014 follow-up
+(recording controls in the Captures section *and* the widget, still one
+recording concept) implies more than one concurrent recording is a real
+need. Supporting multiple concurrent recordings would mean keying
+`RecordingState` by id, deciding what "the widget's Stop button" even
+means with more than one candidate, and reasoning about multiple
+`windows_capture` background threads sharing one process — real added
+complexity with no identified use case to justify it now.
+**Consequence:** a second `start_recording_capture` call while one is in
+progress fails with a clear `AppError::Validation`, not a queue or a
+silent replacement of the first recording; if a genuine multi-recording
+need appears later, `RecordingState` would need to become keyed rather
+than a single `Option`, a contained change scoped to that one module.
+
+**Decision:** `start_recording_capture`/`stop_recording_capture` are two
+separate Tauri commands with an in-progress handle held in Tauri-managed
+`recording::RecordingState`, rather than one command that starts and
+stops after a fixed duration, or holding the handle inside
+`CaptureService` itself.
+**Reason:** a recording's length is exactly "however long the user
+leaves it running" — there is no fixed duration to accept as a
+parameter, so a single "record for N seconds" command was never a real
+option here. Holding the handle inside `CaptureService` isn't possible
+either: a fresh `CaptureService` is constructed for *every* command (see
+`commands::capture::service`/`commands::recording::capture_service`,
+and DECISIONS.md's TASK-011 entry for `hotkey::handle_capture_shortcut`
+making the same choice for the same reason) — nothing about it survives
+between the `start` and `stop` IPC calls, which are two entirely
+separate round trips from the frontend.
+**Consequence:** `RecordingState` becomes a second piece of Tauri-managed
+state alongside `active_process::ActiveProcessState` (TASK-011),
+following the same shape; `CaptureService` stays exactly as stateless as
+it always was, with `commands::recording` doing the same
+construct-fresh-per-command dance every other command module already
+does.
+
+**Decision:** `RecordingState::start` takes a closure and holds its
+internal lock for the *entire* validate-and-launch sequence — including
+the real `WindowsRecordingEngine::start()` call — rather than only
+around a quick "is one already running?" check performed before calling
+the engine separately.
+**Reason:** checking "is a recording in progress?" and then, separately,
+starting a real native recording and storing its handle is a classic
+check-then-act race: two concurrent `start_recording_capture` calls
+could both observe "nothing in progress," both start a real
+`windows_capture` session, and then one of them would overwrite the
+other's handle in `RecordingState` — silently leaking a real capture
+thread that nothing would ever be able to `stop()`. Holding the lock
+across the whole sequence means a second concurrent call blocks until
+the first either fails (nothing stored, the lock is released, the
+second proceeds normally) or succeeds (the first is now stored, the
+second correctly sees "already in progress" and never starts a real
+recording at all).
+**Consequence:** `RecordingState::start`'s closure runs while holding a
+`std::sync::Mutex` guard — acceptable here since Tauri command handlers
+already run on a blocking thread pool (no `async`/`.await` inside the
+closure), and `WindowsRecordingEngine::start()` itself returns quickly
+(`start_free_threaded` hands capture off to its own background thread
+rather than blocking for the recording's duration).
+
+**Decision:** a recording's Capture id is generated *before* the
+recording starts (used to compute `media::MediaStorage::video_path`,
+which the native engine writes to directly), and `CaptureService::
+finalize_recording` accepts that id as a parameter rather than
+generating a fresh one when the metadata row is finally created.
+**Reason:** unlike a screenshot (bytes fully in memory, so the metadata
+row and the file can be created back-to-back with a single freshly
+generated id), a recording's video is written incrementally to disk by
+a background thread for however long the recording runs — the file has
+to exist at some fixed path from the moment `start_recording_capture`
+returns, long before any metadata row exists. The id has to be decided
+at that point, and `finalize_recording` must reuse the exact same one.
+**Consequence:** `finalize_recording`'s signature looks different from
+`create`/`create_screenshot` (which both generate their own id
+internally) — a small, deliberate asymmetry rather than an oversight,
+documented in its own doc comment (see `services/capture.rs`).
+
+**Decision:** an in-progress recording whose `stop_recording_capture`
+never runs (e.g. the app is closed, or crashes, mid-recording) is left
+to `media::MediaStorage::reconcile`'s existing startup orphan sweep —
+already relied on for the Project/Process cascade-delete limitation
+(TASK-009) — rather than adding any new cleanup mechanism specific to
+recordings.
+**Reason:** the video file such a recording leaves behind has no
+matching Capture row (one was never created, since only
+`finalize_recording` creates it) — which is *exactly* the condition
+`reconcile` already detects and removes for orphaned screenshots. Once
+`reconcile` was widened to sweep `.mp4` alongside `.png` (a small,
+already-needed change for TASK-013 regardless), this scenario is
+handled for free, with zero new code specific to "recording interrupted
+by shutdown."
+**Consequence:** an interrupted recording's partial video file survives
+until the *next* application startup, not immediately — the same
+"eventually, not instantly" limitation TASK-009 already documented and
+accepted for cascade-orphaned screenshots, now also covering this case;
+no attempt was made to intercept application shutdown/`Quit` to stop an
+in-progress recording gracefully, since the main-window UI already
+prevents *closing the dialog* during a recording (see the UI decision
+below) — an in-progress recording surviving to shutdown means the user
+force-quit or closed the app some other way, an edge case judged
+acceptable for TASK-013's scope.
+
+**Decision:** the Create Capture dialog disables Cancel (and every
+field) once a real recording has started, rather than allowing the user
+to back out and leaving the in-progress recording running
+unsupervised.
+**Reason:** there is no "abandon this recording" operation — the only
+way to stop `windows_capture`'s background thread and finalize the file
+is `stop_recording_capture`, which is also the only thing that ever
+creates the Capture metadata row. Letting Cancel close the dialog while
+a recording is running would leave a real, resource-consuming native
+recording with no UI left to stop it short of restarting the app (at
+which point the orphan sweep above cleans it up, but only on the
+*next* launch).
+**Consequence:** once "Start recording" is clicked, the user is
+committed to eventually clicking "Stop recording" — there is currently
+no way to cancel/discard an in-progress recording from the UI. This
+matches TASK-013's explicitly minimal scope ("no polish"); a cleaner
+cancel-and-discard affordance is left to TASK-014 if real use shows it's
+needed.

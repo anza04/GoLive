@@ -6,6 +6,7 @@ mod hotkey;
 mod media;
 mod models;
 mod native;
+mod recording;
 mod repositories;
 mod services;
 mod tray;
@@ -49,6 +50,7 @@ pub fn run() {
             app.manage(db_service);
             app.manage(media_storage);
             app.manage(active_process::ActiveProcessState::default());
+            app.manage(recording::RecordingState::default());
 
             // System tray (TASK-010): built last, once the state above
             // is settled, so its "Open GoLive" handler always has a
@@ -128,6 +130,8 @@ pub fn run() {
             commands::active_process::sync_active_process,
             commands::active_process::get_active_process,
             commands::widget::hide_widget,
+            commands::recording::start_recording_capture,
+            commands::recording::stop_recording_capture,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

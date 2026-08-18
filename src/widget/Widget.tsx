@@ -3,6 +3,7 @@ import { getErrorMessage } from "../utils/errorMessage";
 import { hideWidget } from "../services/widget";
 import { getActiveProcess, onActiveProcessChanged, type ActiveProcessInfo } from "../services/activeProcess";
 import {
+  createQuickMarker,
   createScreenshotCapture,
   onScreenshotCaptured,
   type ScreenshotCaptureResult,
@@ -22,17 +23,23 @@ type Feedback = { kind: "ok" | "error"; message: string };
  * pushed to Rust when the user selected/created/renamed a Process there.
  *
  * Deliberately minimal: no dialog, no title/description fields, no way
- * to switch the active Process from here — just "what's active" and one
- * button, matching the global hotkey's own no-dialog, instant-capture
- * behavior (see `hotkey.rs`). The two share one default title
- * ("Screenshot") rather than the widget asking for one, so pressing the
- * hotkey and clicking this button always produce the same kind of
- * Capture.
+ * to switch the active Process from here — just "what's active" and two
+ * buttons, matching the global hotkey's own no-dialog, instant-capture
+ * behavior (see `hotkey.rs`). Screenshot and marker both share one
+ * default title scheme rather than the widget asking for one, so using
+ * either action always produces a predictable kind of Capture.
+ *
+ * "Add marker" (TASK-012) is the near-zero-friction way to flag a
+ * moment during live work: one click creates a `note`-type Capture with
+ * an auto-generated timestamp title and no description — no dialog, no
+ * required input (see `services/captures.ts`'s `createQuickMarker`).
  */
 export function Widget() {
   const [active, setActive] = useState<ActiveProcessInfo | null>(null);
   const [capturing, setCapturing] = useState(false);
+  const [marking, setMarking] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const busy = capturing || marking;
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +59,7 @@ export function Widget() {
   }, []);
 
   async function handleCapture() {
-    if (!active || capturing) return;
+    if (!active || busy) return;
 
     setCapturing(true);
     setFeedback(null);
@@ -63,6 +70,21 @@ export function Widget() {
       setFeedback({ kind: "error", message: getErrorMessage(err) });
     } finally {
       setCapturing(false);
+    }
+  }
+
+  async function handleMarker() {
+    if (!active || busy) return;
+
+    setMarking(true);
+    setFeedback(null);
+    try {
+      await createQuickMarker(active.processId);
+      setFeedback({ kind: "ok", message: "Marker added" });
+    } catch (err) {
+      setFeedback({ kind: "error", message: getErrorMessage(err) });
+    } finally {
+      setMarking(false);
     }
   }
 
@@ -93,14 +115,25 @@ export function Widget() {
           <p className="widget__empty">No active process — open GoLive and select one.</p>
         )}
 
-        <button
-          type="button"
-          className="button button--primary widget__capture"
-          onClick={() => void handleCapture()}
-          disabled={!active || capturing}
-        >
-          {capturing ? "Capturing…" : "Capture screenshot"}
-        </button>
+        <div className="widget__actions">
+          <button
+            type="button"
+            className="button button--primary widget__capture"
+            onClick={() => void handleCapture()}
+            disabled={!active || busy}
+          >
+            {capturing ? "Capturing…" : "Capture screenshot"}
+          </button>
+
+          <button
+            type="button"
+            className="button widget__marker"
+            onClick={() => void handleMarker()}
+            disabled={!active || busy}
+          >
+            {marking ? "Adding…" : "Add marker"}
+          </button>
+        </div>
 
         {feedback && (
           <p className={`widget__feedback widget__feedback--${feedback.kind}`} role="status">

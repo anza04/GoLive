@@ -65,16 +65,9 @@ impl CaptureService {
         title: &str,
         description: Option<&str>,
     ) -> Result<Capture, AppError> {
-        let title = validate_title(title)?;
-        let description = validate_description(description.unwrap_or(""))?;
+        let (title, description) = self.validate_for_create(process_id, title, description)?;
         let capture_type = CaptureType::parse(capture_type)
             .ok_or_else(|| AppError::Validation("Invalid capture type.".to_string()))?;
-
-        // Confirms the process exists before creating a capture under it.
-        // The `process_id` foreign key (ON DELETE CASCADE) would also
-        // reject an orphaned insert, but checking here first gives a
-        // clear AppError::NotFound instead of a generic database error.
-        self.processes.get(process_id)?.ok_or(AppError::NotFound)?;
 
         let now = now_ms();
         let capture = Capture {
@@ -111,10 +104,7 @@ impl CaptureService {
         title: &str,
         description: Option<&str>,
     ) -> Result<Capture, AppError> {
-        let title = validate_title(title)?;
-        let description = validate_description(description.unwrap_or(""))?;
-
-        self.processes.get(process_id)?.ok_or(AppError::NotFound)?;
+        let (title, description) = self.validate_for_create(process_id, title, description)?;
 
         // Nothing has been created yet — if capture fails, there's
         // nothing to roll back.
@@ -144,6 +134,94 @@ impl CaptureService {
         if let Err(err) = self.repository.create(&capture) {
             if let Err(cleanup_err) = self.media.delete_capture(&id) {
                 eprintln!("[golive] failed to clean up orphaned screenshot media for {id}: {cleanup_err}");
+            }
+            return Err(err);
+        }
+
+        Ok(capture)
+    }
+
+    /// Trims/validates `title`/`description` and confirms `process_id`
+    /// refers to a real process — the checks every Capture-creation path
+    /// shares (`create`, `create_screenshot`, and TASK-013's two-phase
+    /// recording flow below). Extracted so all three apply the exact
+    /// same rules rather than three independent copies drifting apart.
+    fn validate_for_create(
+        &self,
+        process_id: &str,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<(String, String), AppError> {
+        let title = validate_title(title)?;
+        let description = validate_description(description.unwrap_or(""))?;
+
+        // Confirms the process exists before creating a capture under it.
+        // The `process_id` foreign key (ON DELETE CASCADE) would also
+        // reject an orphaned insert, but checking here first gives a
+        // clear AppError::NotFound instead of a generic database error.
+        self.processes.get(process_id)?.ok_or(AppError::NotFound)?;
+
+        Ok((title, description))
+    }
+
+    /// Validates a `start_recording_capture` request — same rules as
+    /// `create`/`create_screenshot` (title/description trimming and
+    /// length limits, process must exist) — *before* a real recording is
+    /// started, so an invalid request never starts one that would then
+    /// need to be aborted and cleaned up. Returns the trimmed
+    /// `(title, description)`; the caller (`commands::recording`) carries
+    /// them forward to `finalize_recording` once the recording stops.
+    pub fn validate_recording_start(
+        &self,
+        process_id: &str,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<(String, String), AppError> {
+        self.validate_for_create(process_id, title, description)
+    }
+
+    /// Creates the Capture metadata row for a just-finished recording —
+    /// the second half of TASK-013's two-phase flow
+    /// (`native::recording::RecordingEngine` already wrote the video
+    /// file to `media.video_path(id)` while the recording was in
+    /// progress; `commands::recording::stop_recording_capture` calls
+    /// this only after successfully stopping/finalizing it). Unlike
+    /// `create`/`create_screenshot`, `id` is supplied by the caller
+    /// rather than generated here — the metadata row must use the same
+    /// id the video file was already written under, not a fresh one.
+    ///
+    /// Confirms the video file actually exists first (a defensive check:
+    /// a recording stopped the instant after it started could plausibly
+    /// produce no frames/no file — see docs/architecture.md). If the
+    /// metadata insert then fails, the video file is cleaned up, the
+    /// same discipline `create_screenshot` established for PNGs.
+    pub fn finalize_recording(
+        &self,
+        id: &str,
+        process_id: &str,
+        title: &str,
+        description: &str,
+    ) -> Result<Capture, AppError> {
+        if !self.media.video_exists(id) {
+            return Err(AppError::Capture(
+                "The recording finished but produced no video file.".to_string(),
+            ));
+        }
+
+        let now = now_ms();
+        let capture = Capture {
+            id: id.to_string(),
+            process_id: process_id.to_string(),
+            capture_type: CaptureType::Recording,
+            title: title.to_string(),
+            description: description.to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        if let Err(err) = self.repository.create(&capture) {
+            if let Err(cleanup_err) = self.media.delete_video(id) {
+                eprintln!("[golive] failed to clean up orphaned recording media for {id}: {cleanup_err}");
             }
             return Err(err);
         }
@@ -213,20 +291,25 @@ impl CaptureService {
     }
 
     /// Deletes the Capture's metadata row, then best-effort deletes its
-    /// media file. A Note/Recording capture never had one —
-    /// `MediaStorage::delete_capture` is a graceful no-op for a missing
-    /// file, so this needs no branch on `capture_type`. If the metadata
-    /// delete itself reports "not found", media is left untouched (see
-    /// docs/architecture.md, "Delete behavior") — there's deliberately no
-    /// "delete the file first" path. A genuine media-cleanup failure
-    /// (as opposed to "already missing") is logged, not surfaced: the
-    /// metadata — the source of truth for whether a Capture exists — is
-    /// already gone, which is what a successful delete means to the
-    /// user; raw filesystem errors are never shown to the frontend.
+    /// media file — both the PNG (screenshot) and MP4 (recording, TASK-013)
+    /// paths are attempted unconditionally; a Capture is never both, and
+    /// `MediaStorage::delete_capture`/`delete_video` are graceful no-ops
+    /// for a missing file, so this needs no branch on `capture_type`. If
+    /// the metadata delete itself reports "not found", media is left
+    /// untouched (see docs/architecture.md, "Delete behavior") — there's
+    /// deliberately no "delete the file first" path. A genuine
+    /// media-cleanup failure (as opposed to "already missing") is
+    /// logged, not surfaced: the metadata — the source of truth for
+    /// whether a Capture exists — is already gone, which is what a
+    /// successful delete means to the user; raw filesystem errors are
+    /// never shown to the frontend.
     pub fn delete(&self, id: &str) -> Result<(), AppError> {
         if self.repository.delete(id)? {
             if let Err(err) = self.media.delete_capture(id) {
                 eprintln!("[golive] failed to delete capture media for {id}: {err}");
+            }
+            if let Err(err) = self.media.delete_video(id) {
+                eprintln!("[golive] failed to delete recording media for {id}: {err}");
             }
             Ok(())
         } else {
@@ -724,6 +807,114 @@ mod tests {
         // Must not error even though no media file was ever written for
         // this capture.
         service.delete(&capture.id).expect("delete of metadata-only capture should succeed");
+    }
+
+    #[test]
+    fn validate_recording_start_trims_and_rejects_like_create() {
+        let (_dir, service, process_id) = service_with_process();
+
+        let (title, description) = service
+            .validate_recording_start(&process_id, "  My recording  ", Some("  notes  "))
+            .expect("validate");
+        assert_eq!(title, "My recording");
+        assert_eq!(description, "notes");
+
+        assert!(matches!(
+            service.validate_recording_start(&process_id, "", None),
+            Err(AppError::Validation(_))
+        ));
+        assert!(matches!(
+            service.validate_recording_start("does-not-exist", "Title", None),
+            Err(AppError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn finalize_recording_creates_a_recording_capture_using_the_given_id() {
+        let (_dir, service, process_id, media_dir) = service_with_process_and_media();
+        let id = uuid::Uuid::new_v4().to_string();
+
+        // Stand in for what `native::recording::RecordingEngine` would
+        // have already written to disk by the time `stop_recording_capture`
+        // calls `finalize_recording`.
+        std::fs::write(media_dir.join(format!("{id}.mp4")), b"fake mp4 bytes").unwrap();
+
+        let capture = service.finalize_recording(&id, &process_id, "My recording", "notes").unwrap();
+
+        assert_eq!(capture.id, id);
+        assert_eq!(capture.process_id, process_id);
+        assert_eq!(capture.capture_type, CaptureType::Recording);
+        assert_eq!(capture.title, "My recording");
+        assert_eq!(capture.description, "notes");
+        assert_eq!(capture.created_at, capture.updated_at);
+
+        let listed = service.list_by_process(&process_id).unwrap();
+        assert_eq!(listed.len(), 1);
+    }
+
+    #[test]
+    fn finalize_recording_fails_when_no_video_file_was_written() {
+        let (_dir, service, process_id) = service_with_process();
+        let id = uuid::Uuid::new_v4().to_string();
+
+        let result = service.finalize_recording(&id, &process_id, "Title", "");
+        assert!(matches!(result, Err(AppError::Capture(_))));
+        assert_eq!(service.list_by_process(&process_id).unwrap().len(), 0, "no orphan Capture row");
+    }
+
+    #[test]
+    fn finalize_recording_cleans_up_the_video_when_metadata_insert_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = DbService::init(dir.path()).expect("db init");
+        let media = crate::media::MediaStorage::init(dir.path()).expect("media init");
+
+        let project = Project {
+            id: "proj1".to_string(),
+            name: "Sample project".to_string(),
+            description: String::new(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        SqliteProjectRepository::new(db.pool()).create(&project).unwrap();
+        let process = Process {
+            id: "process1".to_string(),
+            project_id: project.id.clone(),
+            name: "Sample process".to_string(),
+            description: String::new(),
+            status: ProcessStatus::Draft,
+            created_at: 1,
+            updated_at: 1,
+        };
+        SqliteProcessRepository::new(db.pool()).create(&process).unwrap();
+
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(media.video_path(&id).unwrap(), b"fake mp4 bytes").unwrap();
+
+        let service = CaptureService::new(
+            Box::new(FailingCreateCaptureRepository { inner: SqliteCaptureRepository::new(db.pool()) }),
+            Box::new(SqliteProcessRepository::new(db.pool())),
+            media.clone(),
+            Box::new(FakeScreenshotEngine::new(vec![9, 9, 9])),
+        );
+
+        let result = service.finalize_recording(&id, &process.id, "Title", "");
+        assert!(matches!(result, Err(AppError::Database)));
+        assert!(!media.video_exists(&id), "orphaned video must be cleaned up after a metadata-insert failure");
+    }
+
+    #[test]
+    fn delete_removes_recording_media_alongside_metadata() {
+        let (_dir, service, process_id, media_dir) = service_with_process_and_media();
+        let id = uuid::Uuid::new_v4().to_string();
+        let video_path = media_dir.join(format!("{id}.mp4"));
+        std::fs::write(&video_path, b"fake mp4 bytes").unwrap();
+        let capture = service.finalize_recording(&id, &process_id, "Title", "").unwrap();
+        assert!(video_path.exists());
+
+        service.delete(&capture.id).expect("delete");
+
+        assert!(matches!(service.get(&capture.id), Err(AppError::NotFound)));
+        assert!(!video_path.exists(), "video file must be removed on delete");
     }
 
     #[test]

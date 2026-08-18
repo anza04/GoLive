@@ -24,7 +24,7 @@
         "title": "GoLive Capture",
         "url": "widget.html",
         "width": 260,
-        "height": 170,
+        "height": 210,
         "resizable": false,
         "alwaysOnTop": true,
         "decorations": false,
