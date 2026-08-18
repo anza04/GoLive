@@ -689,3 +689,184 @@ the task brief's explicit requirement that invalid capture types "reject
 plus the missing-process case) prove the rejection path returns a
 structured, safe `AppError::Validation` message, not a raw deserialization
 failure the frontend's `getErrorMessage()` can't handle.
+
+## TASK-009 — Real screenshot capture
+
+**Decision:** `xcap` (with its `image` feature) was chosen for native
+screen capture, over hand-rolling GDI calls against the `windows` crate
+directly, over `scrap`, and over `xcap`'s own predecessor crate
+(`screenshots`, by the same author).
+**Reason:** the task brief asked to "prefer an established Rust-
+compatible Windows screenshot library" and avoid "a large framework."
+`xcap` is actively maintained (unlike `screenshots`, which its own
+maintainer has effectively superseded with `xcap`); its public API for
+this task's exact need — list monitors, find the primary one, capture it,
+get back an `image::RgbaImage` — is three calls
+(`Monitor::all()`/`is_primary()`/`capture_image()`), and it re-exports
+the `image` crate it already depends on (`xcap::image`), so no second
+direct dependency was needed to encode PNG. `scrap` was not seriously
+evaluated: it's lower-level (raw frame buffers, no built-in PNG path) and
+less actively maintained than `xcap`. Hand-rolling GDI directly against
+`windows-rs` was rejected as strictly more code and more Windows-API
+surface for this project to own and maintain, for no capability `xcap`
+doesn't already provide correctly.
+**Consequence:** one new dependency (`xcap`), isolated entirely behind
+`native::screenshot::ScreenshotEngine` (see docs/architecture.md §22) —
+nothing above `WindowsScreenshotEngine` ever imports `xcap` directly.
+`xcap`'s optional `wgc` feature (Windows Graphics Capture, extra
+Direct3D/DXGI bindings) was deliberately left disabled: the default
+GDI-based capture is the simplest option that reliably satisfies this
+task's one required mode ("capture the primary/current display"), and
+`wgc` would only be justified by a future need (e.g. capturing a
+minimized/occluded window) TASK-009 doesn't have.
+
+**Decision:** screenshot media is stored as a plain file
+(`<app_data_dir>/captures/<capture-id>.png`) under the same
+Tauri-resolved application-data directory the SQLite database already
+lives in, keyed by `Capture.id` alone — no path column was added to the
+`captures` table, and no database migration was needed.
+**Reason:** required by the task brief almost verbatim ("Do NOT store
+screenshot binary data inside SQLite," "prefer deriving the storage
+location from Capture.id," "the existing Capture schema is intentionally
+metadata-based"). Deriving the path from `id` also happens to be the
+entire path-safety mechanism (see below) — no separate sanitization logic
+was needed once the id itself is validated as a UUID.
+**Consequence:** the Capture/media relationship is structural
+(`captures/<id>.png`), not stored anywhere — `media::MediaStorage` is the
+only code that ever constructs that path, and it does so identically for
+every caller (create, read, delete, reconcile).
+
+**Decision:** `MediaStorage::path_for` validates `capture_id` by parsing
+it as a UUID (`uuid::Uuid::parse_str`) and rejects anything else with
+`AppError::Validation`, rather than writing bespoke path-traversal
+sanitization (stripping `..`, checking for absolute paths, canonicalizing
+and verifying a prefix, etc.).
+**Reason:** the task brief required that "path traversal... [be]
+structurally impossible," not just filtered. A string that parses as a
+UUID can, by definition, contain nothing but hex digits and hyphens in a
+fixed 36-character shape — there is no character set overlap with `/`,
+`\`, `:`, or `.` that any traversal or absolute-path attack needs, so
+this single check is a strictly stronger, simpler guarantee than
+denylisting dangerous substrings, and it doubles as validating that the
+id is well-formed at all.
+**Consequence:** `services::media::tests::paths_cannot_escape_the_media_
+directory` (in `media::tests`) proves several classic traversal payloads
+(`../../../etc/passwd`, a Windows UNC-style `..\..\windows\system32`, an
+absolute path, an embedded `/`) are all rejected identically, and that
+nothing is ever written to disk for any of them.
+
+**Decision:** screenshot creation is orchestrated at the service level
+(capture → save PNG → insert metadata row, with the PNG deleted if the
+metadata insert fails) rather than as a real database transaction.
+**Reason:** required by the task brief, which explicitly said a real DB
+transaction isn't the right tool here ("the exact implementation can use
+a service-level orchestration rather than a database transaction because
+the media is filesystem data"). SQLite transactions can't span a
+filesystem write; wrapping only the DB insert in one wouldn't have
+changed anything about the actual risk (an orphan file after a DB
+failure), which is what needed handling.
+**Consequence:** `CaptureService::create_screenshot` writes the PNG
+*before* the metadata row specifically so a metadata-insert failure has
+something to clean up — the reverse order would risk the opposite,
+strictly worse failure mode (a Capture row implying media that was never
+written). Proven by `create_screenshot_cleans_up_the_png_when_metadata_
+insert_fails`, using a `CaptureRepository` test double whose `create`
+always fails.
+
+**Decision:** orphaned screenshot media left behind by a Project/Process
+cascade delete is cleaned up by a reconciliation sweep at application
+startup (`CaptureService::reconcile_media`, called once from `lib.rs`'s
+`.setup()`), not synchronously during the cascade itself. Direct Capture
+deletion (`CaptureService::delete`) still cleans up its media
+immediately.
+**Reason:** the task brief was explicit that this was an acceptable,
+even preferred, outcome if the alternative compromised existing
+boundaries: "Do not introduce an inefficient: for every capture: delete
+file loop inside Project deletion... If full automatic media cleanup for
+cascaded database deletions cannot be implemented safely... without
+compromising the existing cascade architecture, document the limitation
+clearly." Making `ProcessService`/`ProjectService` aware of
+`CaptureRepository`/`MediaStorage` so they could delete files
+synchronously during their own delete calls would have inverted the
+domain's dependency direction (currently strictly Capture → Process →
+Project) for every future child domain, not just this one, and turned
+"delete a project" into an operation that also has to walk every
+descendant's media — exactly the "loop... without considering the
+existing repository and service boundaries" the brief warned against.
+**Consequence:** a PNG orphaned by a cascade delete is not removed until
+GoLive is next launched, not the instant the cascade happens — stated
+explicitly in docs/architecture.md §22 as a known, deliberate limitation
+rather than something silently swept under the rug. Reconciliation itself
+is cheap (one directory listing, one `SELECT id FROM captures`, one set
+difference) and generic — the same sweep will clean up orphaned recording
+files whenever that media type exists, with no changes needed.
+
+**Decision:** editing a screenshot Capture's `type` away from
+`screenshot` (via the existing generic edit dialog/command) does not
+delete, move, or otherwise touch its PNG file. The file simply becomes
+unreachable through the UI (which only requests media for
+`type === "screenshot"`) until/unless the type is changed back.
+**Reason:** the task brief explicitly flagged this exact scenario as
+something to think through rather than hack around: "Do not accidentally
+create impossible states such as: type changed from screenshot to note
+while an orphan screenshot PNG remains... preserve existing functionality
+and document the decision rather than silently deleting or replacing
+media." Deleting the file on a type-away edit would be a destructive,
+surprising side effect of what the user experiences as an ordinary
+metadata edit (Edit dialog, Save) with no explicit "delete media" action
+taken; deleting it and finding out `update` can never recreate it (that's
+`create_screenshot`'s job, not `update`'s) would make changing the type
+back to Screenshot silently show nothing, which is worse than doing
+nothing at all.
+**Consequence:** because the file is keyed by `Capture.id` (not by
+`capture_type`), this "do nothing" choice has a pleasant side effect for
+free: changing the type back to Screenshot later makes the original
+image reappear correctly, with zero special-case code — proven by
+`update_changing_type_away_from_screenshot_does_not_delete_media`.
+
+**Decision:** one new `AppError` variant, `Capture(String)`, was added
+for native capture-engine failures (no display available, PNG encode
+failure) — `xcap::XCapError` converts to it via a `From` impl.
+Filesystem failures actually *storing* media (directory creation, PNG
+read/write/delete) deliberately reuse the existing `AppError::Storage`
+(via the existing `From<std::io::Error>` impl) instead of getting their
+own variant.
+**Reason:** the task brief permitted a new variant if none of the
+existing ones were genuinely appropriate ("If existing Storage/Database
+errors are appropriate, reuse them... Do not introduce new AppError
+variants unless genuinely necessary"). None of `Storage`/`Database`/
+`Validation`/`NotFound` accurately describes "the OS couldn't capture the
+screen" — it's not a storage-preparation problem, not a SQL problem, not
+malformed user input, and not a missing record — so a new variant was
+judged genuinely necessary there. A filesystem failure *storing* the PNG,
+by contrast, is exactly the same category `Storage`'s existing doc
+comment already covers ("the local application-data directory or
+database file could not be prepared or accessed") once that comment was
+extended to also name the captures directory — reusing it needed no new
+code at all, since `MediaStorage`'s `std::fs` calls already convert via
+the pre-existing `From<std::io::Error>` impl.
+**Consequence:** `AppError::Capture` carries the same "author-written,
+safe, shown as-is" contract as `Validation` (see §10) — e.g. "No display
+is available to capture." / "Screenshot capture failed. Please try
+again." — never a raw `XCapError`/`ImageError` message. Its `code` is
+`"capture_error"`, a new stable string the frontend can (but doesn't yet
+need to) branch on, the same way `isNotFoundError()` branches on
+`"not_found"`.
+
+**Decision:** `get_capture_media` returns `tauri::ipc::Response` (raw
+bytes) instead of a JSON-serialized `Vec<u8>` or a Tauri asset-protocol/
+`convertFileSrc` URL exposing a real filesystem path.
+**Reason:** the task brief explicitly forbade a `read_file(path)`/
+`get_file(path)`-shaped command "where the frontend can provide arbitrary
+filesystem paths," and asked for "the simplest approach compatible with
+the existing Tauri 2 architecture and security model." A raw-bytes IPC
+response keyed only by Capture id satisfies both: no path ever crosses
+the IPC boundary in either direction, and `tauri::ipc::Response` is
+Tauri 2's own documented mechanism for this exact "return binary data
+without the ~3-4x JSON-array size/parse overhead" problem — no new Tauri
+capability/scope was needed, since it's IPC, not the asset protocol.
+**Consequence:** `services/captures.ts`'s `getCaptureMediaUrl` receives
+the bytes as an `ArrayBuffer` (Tauri's `invoke()` detects a `Response`-
+returning command automatically) and wraps them in a `blob:` object URL
+for `<img src>` — the frontend never sees, stores, or could construct a
+real filesystem path for a Capture's media.

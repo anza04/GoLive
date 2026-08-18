@@ -1,10 +1,13 @@
 //! Thin Tauri-facing commands for the Capture domain. Each one just
-//! builds a `CaptureService` from the managed `DbService` and delegates —
-//! no business logic, no SQL (same pattern as `commands::process`).
+//! builds a `CaptureService` from the managed `DbService`/`MediaStorage`
+//! and delegates — no business logic, no SQL, no filesystem/screenshot
+//! code (same pattern as `commands::process`).
 
 use crate::db::DbService;
 use crate::errors::AppError;
+use crate::media::MediaStorage;
 use crate::models::capture::Capture;
+use crate::native::screenshot::WindowsScreenshotEngine;
 use crate::repositories::capture::SqliteCaptureRepository;
 use crate::repositories::process::SqliteProcessRepository;
 use crate::services::capture::CaptureService;
@@ -40,34 +43,96 @@ pub struct UpdateCaptureInput {
     pub description: Option<String>,
 }
 
-fn service(db: &State<DbService>) -> CaptureService {
+/// Input for the one operation that creates real media (TASK-009). No
+/// `capture_type` field exists here at all — a screenshot operation
+/// always produces `CaptureType::Screenshot`; there is structurally no
+/// way for the frontend to request a screenshot capture typed as
+/// `recording`/`note`. No filesystem path of any kind is accepted either
+/// — the backend determines storage location, filename, id, and
+/// timestamps entirely on its own (see docs/architecture.md, "Safe media
+/// access").
+#[derive(Deserialize)]
+pub struct CreateScreenshotInput {
+    pub process_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+fn service(db: &State<DbService>, media: &State<MediaStorage>) -> CaptureService {
     CaptureService::new(
         Box::new(SqliteCaptureRepository::new(db.pool())),
         Box::new(SqliteProcessRepository::new(db.pool())),
+        media.inner().clone(),
+        Box::new(WindowsScreenshotEngine),
     )
 }
 
 #[tauri::command]
-pub fn create_capture(input: CreateCaptureInput, db: State<DbService>) -> Result<Capture, AppError> {
-    service(&db).create(&input.process_id, &input.capture_type, &input.title, input.description.as_deref())
+pub fn create_capture(
+    input: CreateCaptureInput,
+    db: State<DbService>,
+    media: State<MediaStorage>,
+) -> Result<Capture, AppError> {
+    service(&db, &media).create(&input.process_id, &input.capture_type, &input.title, input.description.as_deref())
+}
+
+/// Captures the primary display, stores the PNG, and creates the Capture
+/// record — the only command that produces real media (see
+/// `services::capture::CaptureService::create_screenshot`).
+#[tauri::command]
+pub fn create_screenshot_capture(
+    input: CreateScreenshotInput,
+    db: State<DbService>,
+    media: State<MediaStorage>,
+) -> Result<Capture, AppError> {
+    service(&db, &media).create_screenshot(&input.process_id, &input.title, input.description.as_deref())
 }
 
 #[tauri::command]
-pub fn list_captures(input: ListCapturesInput, db: State<DbService>) -> Result<Vec<Capture>, AppError> {
-    service(&db).list_by_process(&input.process_id)
+pub fn list_captures(
+    input: ListCapturesInput,
+    db: State<DbService>,
+    media: State<MediaStorage>,
+) -> Result<Vec<Capture>, AppError> {
+    service(&db, &media).list_by_process(&input.process_id)
 }
 
 #[tauri::command]
-pub fn get_capture(id: String, db: State<DbService>) -> Result<Capture, AppError> {
-    service(&db).get(&id)
+pub fn get_capture(id: String, db: State<DbService>, media: State<MediaStorage>) -> Result<Capture, AppError> {
+    service(&db, &media).get(&id)
+}
+
+/// Returns a screenshot Capture's PNG bytes as a raw binary IPC response
+/// (`tauri::ipc::Response`) rather than a JSON byte array — the
+/// recommended Tauri 2 mechanism for transferring binary data
+/// efficiently, and the "dedicated backend media-read command" approach
+/// docs/architecture.md ("Safe media access") calls for: the frontend
+/// supplies only a Capture id, never a filesystem path, and the backend
+/// derives the actual file from that id. Returns `AppError::NotFound` for
+/// both a nonexistent Capture and one with no media (Note/Recording, or a
+/// screenshot Capture since edited to another type) — the frontend treats
+/// both identically (no preview to show).
+#[tauri::command]
+pub fn get_capture_media(
+    id: String,
+    db: State<DbService>,
+    media: State<MediaStorage>,
+) -> Result<tauri::ipc::Response, AppError> {
+    let bytes = service(&db, &media).get_screenshot_media(&id)?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
-pub fn update_capture(input: UpdateCaptureInput, db: State<DbService>) -> Result<Capture, AppError> {
-    service(&db).update(&input.id, &input.capture_type, &input.title, input.description.as_deref())
+pub fn update_capture(
+    input: UpdateCaptureInput,
+    db: State<DbService>,
+    media: State<MediaStorage>,
+) -> Result<Capture, AppError> {
+    service(&db, &media).update(&input.id, &input.capture_type, &input.title, input.description.as_deref())
 }
 
 #[tauri::command]
-pub fn delete_capture(id: String, db: State<DbService>) -> Result<(), AppError> {
-    service(&db).delete(&id)
+pub fn delete_capture(id: String, db: State<DbService>, media: State<MediaStorage>) -> Result<(), AppError> {
+    service(&db, &media).delete(&id)
 }

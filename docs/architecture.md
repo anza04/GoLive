@@ -104,15 +104,24 @@ src-tauri/
       storage.rs               get_local_storage_status
       project.rs                create/list/get/update/delete_project (§18)
       process.rs                 create/list/get/update/delete_process (§20)
-      capture.rs                  create/list/get/update/delete_capture (§21)
+      capture.rs                  create/list/get/update/delete_capture,
+                                    create_screenshot_capture,
+                                    get_capture_media (§21, §22)
     db/
       mod.rs                   DbService: init, pool access
       pool.rs                  r2d2 pool construction + PRAGMAs
       migrations.rs            migration runner
+    media/
+      mod.rs                   MediaStorage: captured-media filesystem
+                                boundary (see §22)
     models/
       project.rs                Project struct (see §18)
       process.rs                  Process struct + ProcessStatus enum (§20)
       capture.rs                   Capture struct + CaptureType enum (§21)
+    native/
+      mod.rs                   native/platform-specific functionality root
+      screenshot.rs            ScreenshotEngine trait +
+                                WindowsScreenshotEngine (see §22)
     repositories/
       storage_status.rs        StorageStatusRepository trait +
                                 SqliteStorageStatusRepository
@@ -121,14 +130,15 @@ src-tauri/
       process.rs                  ProcessRepository trait +
                                    SqliteProcessRepository (see §20)
       capture.rs                   CaptureRepository trait +
-                                    SqliteCaptureRepository (see §21)
+                                    SqliteCaptureRepository (see §21, §22)
     services/
       project.rs                 ProjectService: validation, id/timestamp
                                   generation (see §18)
       process.rs                  ProcessService: validation, id/timestamp
                                    generation, project-existence check (§20)
       capture.rs                   CaptureService: validation, id/timestamp
-                                    generation, process-existence check (§21)
+                                    generation, process-existence check,
+                                    screenshot/media orchestration (§21, §22)
 ```
 
 `commands/`, `db/`, and `repositories/` were introduced by TASK-004.
@@ -138,7 +148,13 @@ infrastructure, not domain logic, so it didn't count as a reason to add
 `services/` on its own; `ProjectService` is the first actual occupant.
 TASK-007 added a sibling `process.rs` file to each of these modules for
 the Process domain, following the exact same shape; TASK-008 added a
-sibling `capture.rs` file the same way for the Capture domain.
+sibling `capture.rs` file the same way for the Capture domain. TASK-009
+added two new top-level modules — `media/` (filesystem storage for
+captured media, analogous to `db/`) and `native/` (platform-specific
+capture engines, the first real occupant of the "Native Windows
+functionality boundary", §9) — rather than folding either into an
+existing module, since neither is domain logic (`services/`),
+persistence-via-SQLite (`repositories/`), or a Tauri command (`commands/`).
 
 ## 4. Frontend → Tauri communication
 
@@ -235,12 +251,16 @@ same trait, without changing the command layer or the UI.
 
 ## 7. File storage boundary
 
-**FUTURE.** GoLive will eventually store recordings, screenshots, audio,
-project files, and exported documents on disk.
+**PARTIALLY CURRENT (TASK-009).** Screenshot PNGs are the first real
+occupant: `media::MediaStorage` (see §22) owns
+`<app_data_dir>/captures/`, a sibling of `<app_data_dir>/database/`.
+Recordings, audio, project files, and exported documents remain
+**FUTURE**.
 
 **Rule:** native filesystem operations live in the Rust/native layer
-(behind a future storage service, analogous to the repository boundary in
-§6), never directly in React. No storage code is implemented by this task.
+(behind `MediaStorage`, analogous to the repository boundary in §6),
+never directly in React — see §22 for the concrete instantiation of this
+rule.
 
 ## 8. AI boundary
 
@@ -263,13 +283,16 @@ introduced by this task.
 
 ## 9. Native Windows functionality boundary
 
-**FUTURE.** Screen recording, screenshots, microphone capture, and global
-shortcuts require native Windows APIs.
+**PARTIALLY CURRENT (TASK-009).** Screenshot capture is the first real
+occupant: `native::screenshot::ScreenshotEngine` (see §22). Screen
+recording, microphone capture, and global shortcuts remain **FUTURE**.
 
 **Rule:** this functionality is implemented as Rust/Tauri services exposed
 through commands. React consumes a clean application API (e.g. "start
 recording", "take screenshot") — it never manipulates Windows APIs
-directly. Nothing under this boundary is implemented yet.
+directly, as demonstrated by `create_screenshot_capture` (§22): the
+frontend asks for a screenshot, the native `xcap`-based engine and
+Windows GDI details never surface above `commands::capture`.
 
 ## 10. Error handling
 
@@ -422,6 +445,7 @@ working one just to shrink the list.
 | `r2d2`, `r2d2_sqlite` (`bundled`) | Connection pool for `rusqlite`, so one long-running database operation doesn't block every other one (see §17, "Concurrency"). |
 | `thiserror` | Derives `AppError`'s `Display`/`std::error::Error` impl (§10) with minimal boilerplate. |
 | `uuid` (`v4`) | Generates `Project` ids (§18). Already an indirect dependency of the toolchain; added as a direct one now that our own code (`ProjectService`) actually calls it. |
+| `xcap` (`image` feature) | TASK-009: captures the primary Windows display and encodes it as PNG (`native::screenshot::WindowsScreenshotEngine`, §22). Chosen over hand-rolling a GDI capture directly against the `windows` crate — `xcap` already wraps that (plus macOS/Linux backends we don't use, but don't pay extra for either — they're behind per-platform `[target.'cfg(...)'.dependencies]` and never compiled into the Windows build) behind a small, actively maintained API (`Monitor::all()` / `capture_image()`) that does exactly what this task needs and nothing more; it re-exports the `image` crate it already depends on (`xcap::image`), so no separate `image` dependency was added. `xcap`'s optional Windows-Graphics-Capture backend (`wgc` feature, extra Direct3D/DXGI bindings) was deliberately **not** enabled — the default GDI backend is the simplest reliable option for "capture the primary display," and TASK-009 explicitly scopes to that one mode (see DECISIONS.md). |
 
 **Dev-only:** `tempfile` — isolated temp directories for the database
 tests (§17), never touching the real per-user app-data directory.
@@ -1141,11 +1165,250 @@ exercise the identical `DbService`/repository code path against a real
 binary was confirmed to start and run cleanly against the real, migrated
 per-user database. See PROJECT_STATE.md for the full record.
 
+## 22. Screenshot capture and media storage (TASK-009)
+
+**CURRENT.** The first task to introduce real media: a Screenshot
+Capture now has an actual PNG behind it, not just metadata. Note and
+Recording Captures remain exactly what TASK-008 left them — metadata
+only.
+
+```
+Screenshot creation:
+
+Captures UI (CreateCaptureDialog, Type = Screenshot)
+    ↓
+frontend capture service   features/projects/services/captures.ts
+    ↓ createScreenshotCapture()
+Tauri invoke("create_screenshot_capture")
+    ↓
+commands::capture::create_screenshot_capture   thin — delegates
+    ↓
+CaptureService::create_screenshot   validation, process-existence check,
+    ↓                                orchestration (see below)
+    ├──→ native::screenshot::ScreenshotEngine   captures the primary
+    │        (WindowsScreenshotEngine, xcap)     display, encodes PNG
+    ├──→ media::MediaStorage::save_capture       writes the PNG to disk
+    └──→ CaptureRepository::create                writes the metadata row
+```
+
+**Two new modules, each a small, single-purpose boundary** (see §7, §9):
+
+- **`native::screenshot`** — the native Windows functionality boundary's
+  first real occupant. `ScreenshotEngine` is a trait (one method,
+  `capture_primary_display() -> Result<Vec<u8>, AppError>`), exactly the
+  same "inject a trait object" shape already used for repositories — so
+  `CaptureService` (and everything above it) never touches `xcap`, GDI,
+  or any Windows-specific detail. `WindowsScreenshotEngine` is the only
+  implementation: `xcap::Monitor::all()` → find the primary monitor →
+  `capture_image()` → encode to PNG in memory (`image::RgbaImage::
+  write_to`, via `xcap`'s own re-export of the `image` crate). Nothing is
+  written to disk here — that's `MediaStorage`'s job. TASK-009
+  deliberately supports only "capture the primary/current display"; the
+  trait is the seam a later task would use to add monitor selection, area
+  selection, or a recording engine, without `CaptureService` or the
+  frontend changing.
+- **`media::MediaStorage`** — the file storage boundary's first real
+  occupant (§7). Owns `<app_data_dir>/captures/`, a sibling of
+  `<app_data_dir>/database/` under the *same* Tauri-resolved
+  application-data directory `db::DbService` already uses — no second
+  app-data mechanism was invented. `save_capture`/`read_capture`/
+  `delete_capture`/`exists`/`reconcile`, all keyed by Capture id alone:
+  `path_for(id)` parses `id` as a UUID before touching the filesystem at
+  all and rejects anything else with `AppError::Validation` — the *only*
+  path-safety check needed, since a valid UUID string can contain
+  nothing but hex digits and hyphens, making path traversal (`../`, an
+  absolute path, an arbitrary filename) structurally impossible
+  regardless of what a caller passes in. Deliberately has no dependency
+  on Tauri types (same rationale as `db::DbService`) — fully
+  unit-testable with a temp directory.
+
+**Capture metadata vs. media — deliberately still one domain, two
+storage backends**, per the task's own explicit instruction not to
+invent a second "Screenshot" domain: SQLite continues to own `Capture`
+metadata (unchanged schema — **no migration was needed**, TASK-009's
+Capture schema is exactly TASK-008's); the filesystem owns the PNG
+bytes. The only link between them is `Capture.id`: `captures/<id>.png`.
+There is no path column, no foreign key, no join — the relationship is
+structural, not stored.
+
+**`CreateScreenshotInput { process_id, title, description }`**
+(`commands::capture`) — deliberately has **no** `capture_type` field at
+all, unlike the generic `CreateCaptureInput`. A screenshot operation
+always produces `CaptureType::Screenshot`; there is structurally no way
+for a request to ask for a screenshot capture typed `recording`/`note`.
+No filesystem path of any kind is ever accepted from the frontend — the
+backend determines storage location, filename, id, and timestamps
+entirely on its own, the same "backend is the only source of these
+values" rule §18 established for `id`/`created_at`/`updated_at` extended
+to cover storage location too.
+
+**Screenshot creation is transactional at the application level**
+(`CaptureService::create_screenshot`) — not a real database transaction
+(the media is filesystem data SQLite doesn't participate in), but
+ordered, deliberate service-level orchestration:
+1. Validate `title`/`description`, confirm the parent Process exists.
+2. Capture the display (`ScreenshotEngine`). If this fails, nothing has
+   been created yet — nothing to roll back.
+3. Save the PNG (`MediaStorage::save_capture`), *before* the metadata
+   row — so a metadata-creation failure has something concrete to clean
+   up next, rather than a Capture row implying media that doesn't exist.
+4. Create the metadata row (`CaptureRepository::create`). If this fails,
+   the just-written PNG is deleted (best-effort, logged if that also
+   fails) so no orphan media is left behind.
+
+Proven by `services::capture::tests::
+create_screenshot_leaves_no_orphan_capture_when_engine_fails` (step 2
+failing) and `create_screenshot_cleans_up_the_png_when_metadata_insert_fails`
+(step 4 failing, using a `CaptureRepository` test double whose `create`
+always errors).
+
+**Safe media access** (`get_capture_media` command) — the frontend never
+receives or sends a filesystem path. It supplies only a Capture id;
+`CaptureService::get_screenshot_media` derives the file entirely through
+`MediaStorage`. Returns `AppError::NotFound` uniformly whether the
+Capture doesn't exist at all or exists but has no media (Note/Recording,
+or a Screenshot Capture since edited to another type) — the frontend
+treats both the same way (no preview to show). The command returns
+`tauri::ipc::Response` (raw bytes) rather than a JSON byte array — Tauri
+2's documented mechanism for transferring binary data efficiently,
+avoiding a ~3-4x JSON-array size/parse cost for a multi-hundred-KB PNG;
+`invoke()` on the frontend receives it as an `ArrayBuffer` transparently.
+`features/projects/services/captures.ts`'s `getCaptureMediaUrl` wraps
+that into a `blob:` object URL an `<img>` can use directly, and documents
+that the caller must `URL.revokeObjectURL` it once done —
+`CaptureDetail.tsx`'s effect cleanup does exactly that whenever the
+selected capture (or its type) changes or the component unmounts.
+
+**Delete behavior** — `CaptureService::delete` deletes the metadata row
+first; only if that reports "a row was actually deleted" does it then
+best-effort delete the media file. A missing media file (Note/Recording,
+which never had one) is a graceful no-op inside `MediaStorage::
+delete_capture`, not an error, so `delete` needs no branch on
+`capture_type`. A genuine media-cleanup I/O failure is logged, never
+surfaced to the frontend — the metadata (the source of truth for whether
+a Capture exists) is already gone, which is what "deleted" means to the
+user; raw filesystem errors are never shown, consistent with §10.
+
+**Cascade media cleanup — a documented limitation, not a workaround.**
+Project → Process → Capture metadata deletion is still owned entirely by
+SQLite's chained `ON DELETE CASCADE` foreign keys (§20, §21) — TASK-009
+does **not** add a `CaptureRepository`/media dependency to
+`ProcessService` or `ProjectService` to delete files synchronously during
+a cascade, which the task explicitly warned against as an inefficient,
+boundary-violating "for every capture: delete file" loop bolted onto an
+unrelated domain's delete path. The database cascade removes the *rows*;
+it was never going to know about files on disk. Instead, orphaned PNGs
+left behind by a Process/Project cascade are swept by a **startup
+reconciliation pass**: `lib.rs`'s `.setup()` builds a `CaptureService`
+and calls `reconcile_media()` once, which compares every `.png` file
+under `captures/` against every Capture id `CaptureRepository::
+list_all_ids()` currently returns, and deletes whatever isn't referenced.
+This is the "clean media-storage cleanup boundary" the task asked for —
+generic (works for any orphaned media file, not just screenshots — ready
+for recordings later), and O(files + rows) once per launch, not a loop
+inside a delete call. A reconciliation failure is logged and never blocks
+startup. **Limitation, stated plainly:** a PNG orphaned by a cascade
+delete is not removed *immediately* — it is removed the next time GoLive
+starts. Proven by `services::capture::tests::
+reconcile_media_removes_files_orphaned_by_a_cascade_delete`, which
+deletes a Capture row directly through the repository (bypassing
+`CaptureService::delete`, which already cleans up synchronously) to
+simulate exactly what a cascade leaves behind, then calls
+`reconcile_media` and asserts the orphan is gone and the still-referenced
+file survives. Direct Capture deletion (the common case — the user
+pressing Delete on a Capture) remains synchronous, as required.
+
+**Editing a screenshot Capture** — `CaptureService::update` is completely
+unchanged from TASK-008: it edits `title`/`description`/`capture_type`
+metadata only, never touches media, and never recaptures. Because
+`captures/<id>.png` is keyed by `Capture.id` alone (not by
+`capture_type`), changing a Screenshot Capture's type to Note/Recording
+(or back) doesn't move, delete, or replace anything — the file simply
+stops (or starts) being reachable through `get_screenshot_media`/shown by
+`CaptureDetail`'s preview, purely because the frontend only requests
+media for `type === "screenshot"`. This was a deliberate choice — see
+DECISIONS.md — over silently deleting media on a type-away edit, which
+the task explicitly warned against. Proven by `services::capture::tests::
+update_changing_type_away_from_screenshot_does_not_delete_media`.
+
+**UI** (`features/projects/components/`):
+- `CreateCaptureDialog` — same three fields (Title/Description/Type) as
+  TASK-008, Type still defaults to Screenshot. When Type is Screenshot,
+  a hint ("This will capture your current screen.") appears and the
+  primary button reads "Capture screenshot" / "Capturing…" instead of
+  "Create capture" / "Creating…", and submission calls
+  `createScreenshotCapture` instead of the generic `createCapture` — for
+  Note/Recording, behavior is byte-for-byte what TASK-008 shipped.
+- `CaptureDetail` — for `type === "screenshot"`, fetches and shows the
+  PNG (loading state while the IPC call is in flight, inline error state
+  if it fails, an `<img>` once ready) between the description and the
+  type/date metadata row, as the task's own recommended layout specifies.
+  The image is bounded (`max-height: 360px`, `object-fit: contain`)
+  inside a rounded, bordered container — scales down, preserves aspect
+  ratio, never forces the surrounding layout to overflow. Note/Recording
+  captures render nothing new here — the same metadata-only detail
+  TASK-008 shipped.
+- `EditCaptureDialog`, `DeleteCaptureDialog`, `CaptureList`,
+  `CaptureTypeBadge`, `CapturesSection` — **unchanged** from TASK-008.
+- The Project Workspace's "Captures" tab (§19) remains genuinely
+  `disabled` — untouched by this task, per its explicit instruction.
+
+**Errors:** one new `AppError` variant, `Capture(String)` — same shape as
+`Validation` (author-written, safe, shown as-is), for native
+capture-engine failures (no display available, PNG encoding failed) that
+don't fit `Storage`/`Database`/`Validation`/`NotFound`. Filesystem
+failures *storing* media (as opposed to *capturing* it) reuse `Storage`
+via the existing `From<std::io::Error>` impl — `MediaStorage`'s
+directory-creation/read/write/delete calls are conceptually the same
+category of failure as the database file being unavailable, so no new
+variant was needed there. See DECISIONS.md for the full reasoning,
+including why `xcap::XCapError` converts to `AppError::Capture` and why
+`get_screenshot_media`/`read_capture` collapse "wrong type" and
+"nonexistent" into the same `NotFound`.
+
+**Dependency:** `xcap` (`image` feature) — see §15 for the full
+why/alternatives-considered entry.
+
+**Testing:** 117 Rust tests (was 95) — 22 new: 11 `media::tests`
+(directory creation + idempotence, save/read round-trip, exists,
+filename derived from id, missing-file read/delete handled gracefully,
+path-traversal rejection for several malicious ids, reconcile removing
+only orphaned `.png` files and leaving non-PNG files alone, reconcile on
+a missing directory), 1 new repository test (`list_all_ids`), and 10 new
+service tests (metadata-only `create` never touches media,
+`create_screenshot` end-to-end incl. type/title, missing-process and
+empty-title rejection, the two transactional-cleanup tests above, type
+change preserving media, delete removing both metadata and media,
+deleting a metadata-only capture with no media succeeding gracefully, and
+the cascade-reconciliation test) — all against isolated
+`tempfile::tempdir()` state, using a `FakeScreenshotEngine`/
+`FailingScreenshotEngine` test double for `ScreenshotEngine` and a
+`FailingCreateCaptureRepository` decorator for the metadata-failure case.
+
+**Screenshot capture testing limitation, stated explicitly:** real native
+screen capture cannot be exercised deterministically inside the automated
+suite the way SQLite-backed logic can — there is no guarantee any given
+CI/agent process has an interactive desktop session for `xcap`/GDI to
+capture. `native::screenshot::tests::capture_primary_display_smoke_test`
+exists specifically to exercise `WindowsScreenshotEngine` for real, but
+is `#[ignore]`d so `cargo test` never depends on one being available; run
+manually with `cargo test -- --ignored capture_primary_display_smoke_test`
+on a machine with a real desktop session. See PROJECT_STATE.md for the
+manual verification actually performed for this task (the smoke test
+did pass in this session's environment, and a further one-off spot-check
+confirmed the captured PNG contains real, correct desktop content — not
+a placeholder — plus a full real-`%APPDATA%` create → simulated-restart
+→ delete cycle through the actual production `CaptureService`/
+`MediaStorage` code, proving the whole pipeline, not just `xcap` in
+isolation).
+
 ## Status
 
-Reflects the state after **TASK-008** (Capture domain, persistence, and
-the Captures section nested inside a Process — still no screen/
-microphone recording, floating widget, global hotkeys, transcription, AI,
-or documentation-generation functionality; Captures are metadata only,
-with no media file attached). See [PROJECT_STATE.md](../PROJECT_STATE.md)
-for the authoritative current implementation status.
+Reflects the state after **TASK-009** (real screenshot capture: a
+Screenshot Capture now has an actual PNG behind it, captured from the
+primary Windows display and stored under the application-data directory
+— still no screen/microphone recording, floating widget, global hotkeys,
+transcription, AI, or documentation-generation functionality; Note and
+Recording Captures remain metadata only). See
+[PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
+implementation status.

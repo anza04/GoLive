@@ -1,7 +1,9 @@
 mod commands;
 mod db;
 mod errors;
+mod media;
 mod models;
+mod native;
 mod repositories;
 mod services;
 
@@ -16,7 +18,32 @@ pub fn run() {
                 err
             })?;
             let db_service = db::DbService::init(&data_dir)?;
+            let media_storage = media::MediaStorage::init(&data_dir)?;
+
+            // Best-effort startup cleanup of screenshot media orphaned by
+            // the Project/Process database cascade (see
+            // docs/architecture.md, "Cascade media cleanup"): SQLite's
+            // `ON DELETE CASCADE` removes Capture rows when their Process
+            // (or Project) is deleted, but never knew about their PNG
+            // files, so a sweep is needed to catch up. A failure here is
+            // logged, never fatal — it must not block the application
+            // from starting.
+            let reconcile_service = services::capture::CaptureService::new(
+                Box::new(repositories::capture::SqliteCaptureRepository::new(db_service.pool())),
+                Box::new(repositories::process::SqliteProcessRepository::new(db_service.pool())),
+                media_storage.clone(),
+                Box::new(native::screenshot::WindowsScreenshotEngine),
+            );
+            match reconcile_service.reconcile_media() {
+                Ok(removed) if removed > 0 => {
+                    eprintln!("[golive] removed {removed} orphaned screenshot file(s) at startup");
+                }
+                Ok(_) => {}
+                Err(err) => eprintln!("[golive] media reconciliation failed at startup: {err}"),
+            }
+
             app.manage(db_service);
+            app.manage(media_storage);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -37,6 +64,8 @@ pub fn run() {
             commands::capture::get_capture,
             commands::capture::update_capture,
             commands::capture::delete_capture,
+            commands::capture::create_screenshot_capture,
+            commands::capture::get_capture_media,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -12,9 +12,13 @@ use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    /// The local application-data directory or database file could not be
-    /// prepared (resolving/creating the directory, opening the file,
-    /// acquiring a pooled connection).
+    /// The local application-data directory, database file, or captured-
+    /// media directory/file could not be prepared or accessed (resolving/
+    /// creating a directory, opening a file, acquiring a pooled
+    /// connection). Reused by `media::MediaStorage` (TASK-009) for PNG
+    /// read/write/delete I/O failures via `From<std::io::Error>` below —
+    /// a filesystem failure storing captured media is the same category
+    /// of problem as one preparing the database file.
     #[error("Local application storage is unavailable. Try restarting GoLive.")]
     Storage,
 
@@ -38,6 +42,17 @@ pub enum AppError {
     /// that isn't in the database).
     #[error("The requested item could not be found.")]
     NotFound,
+
+    /// A native media capture operation failed — e.g. no display is
+    /// available to screenshot, or the captured image could not be
+    /// encoded (see TASK-009, `native::screenshot`). Like `Validation`,
+    /// the message here is an author-written, safe, specific string
+    /// shown to the user as-is — never a raw Windows API or image-crate
+    /// error. Filesystem failures while *storing* captured media (as
+    /// opposed to capturing it) reuse `Storage`/`Database` instead — see
+    /// `media::MediaStorage`.
+    #[error("{0}")]
+    Capture(String),
 }
 
 impl AppError {
@@ -48,6 +63,7 @@ impl AppError {
             Self::Migration => "migration_error",
             Self::Validation(_) => "validation_error",
             Self::NotFound => "not_found",
+            Self::Capture(_) => "capture_error",
         }
     }
 }

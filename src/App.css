@@ -461,6 +461,12 @@ button {
     background-color var(--duration-fast) var(--ease-standard);
 }
 
+.field__hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+}
+
 .field__input:hover,
 .field__textarea:hover {
   border-color: var(--color-text-faint);
@@ -887,6 +893,30 @@ button {
   color: var(--color-text-secondary);
   white-space: pre-wrap;
   max-width: 55ch;
+}
+
+/* Screenshot preview (TASK-009) — bounded so a full-resolution capture
+   never forces the layout to overflow; the image itself is scaled to
+   fit without distortion. */
+
+.capture-detail__media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  min-height: 80px;
+  max-height: 360px;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-surface-alt);
+}
+
+.capture-detail__image {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
 }
 
 .capture-detail__meta {

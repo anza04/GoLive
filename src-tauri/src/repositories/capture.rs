@@ -24,6 +24,12 @@ pub trait CaptureRepository: Send + Sync {
     /// Returns whether a row was actually deleted (`false` if `id` didn't
     /// exist).
     fn delete(&self, id: &str) -> Result<bool, AppError>;
+    /// Every Capture id currently in the database, across every process.
+    /// Used only by `CaptureService::reconcile_media` (TASK-009) to find
+    /// orphaned media files left behind by a Process/Project cascade
+    /// delete this repository never directly participated in (see
+    /// docs/architecture.md, "Cascade media cleanup").
+    fn list_all_ids(&self) -> Result<Vec<String>, AppError>;
 }
 
 pub struct SqliteCaptureRepository {
@@ -111,6 +117,17 @@ impl CaptureRepository for SqliteCaptureRepository {
         let conn = self.pool.get()?;
         let affected = conn.execute("DELETE FROM captures WHERE id = ?1", params![id])?;
         Ok(affected > 0)
+    }
+
+    fn list_all_ids(&self) -> Result<Vec<String>, AppError> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare("SELECT id FROM captures")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
     }
 }
 
@@ -328,6 +345,20 @@ mod tests {
 
         assert!(processes.get("p1").expect("get").is_none());
         assert!(repo.get("c1").expect("get").is_none());
+    }
+
+    #[test]
+    fn list_all_ids_returns_every_capture_across_processes() {
+        let (_dir, repo, processes, projects) = repos_in_temp_dir();
+        projects.create(&sample_project("proj1")).unwrap();
+        processes.create(&sample_process("p1", "proj1")).unwrap();
+        processes.create(&sample_process("p2", "proj1")).unwrap();
+        repo.create(&sample_capture("c1", "p1", "Capture A", 1000)).unwrap();
+        repo.create(&sample_capture("c2", "p2", "Capture B", 2000)).unwrap();
+
+        let mut ids = repo.list_all_ids().expect("list_all_ids");
+        ids.sort();
+        assert_eq!(ids, vec!["c1".to_string(), "c2".to_string()]);
     }
 
     #[test]

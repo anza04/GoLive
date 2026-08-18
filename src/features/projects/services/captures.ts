@@ -28,6 +28,17 @@ export interface UpdateCaptureInput {
   description?: string;
 }
 
+/** Input for `createScreenshotCapture` — deliberately has no `captureType`
+ * field at all. A screenshot operation always produces a
+ * `type: "screenshot"` Capture; there is no way to ask it for anything
+ * else (see docs/architecture.md, "Screenshot creation is
+ * transactional"). */
+export interface CreateScreenshotInput {
+  processId: string;
+  title: string;
+  description?: string;
+}
+
 // The IPC wire shape: matches the Rust `Capture` struct's field names
 // exactly (snake_case). `type` needs no translation — the backend
 // already serializes it as one of the three stable lowercase strings
@@ -66,6 +77,25 @@ export async function createCapture(input: CreateCaptureInput): Promise<Capture>
   return fromRaw(raw);
 }
 
+/**
+ * Captures the primary Windows display, stores it, and creates the
+ * Capture record — the real-media counterpart to `createCapture`. Always
+ * produces `type: "screenshot"`; there is no `captureType` parameter to
+ * pass (see `CreateScreenshotInput`). The frontend never sees a
+ * filesystem path — the backend determines storage location, filename,
+ * id, and timestamps entirely on its own.
+ */
+export async function createScreenshotCapture(input: CreateScreenshotInput): Promise<Capture> {
+  const raw = await invoke<RawCapture>("create_screenshot_capture", {
+    input: {
+      process_id: input.processId,
+      title: input.title,
+      description: input.description,
+    },
+  });
+  return fromRaw(raw);
+}
+
 export async function listCaptures(processId: string): Promise<Capture[]> {
   const raw = await invoke<RawCapture[]>("list_captures", {
     input: { process_id: processId },
@@ -76,6 +106,25 @@ export async function listCaptures(processId: string): Promise<Capture[]> {
 export async function getCapture(id: string): Promise<Capture> {
   const raw = await invoke<RawCapture>("get_capture", { id });
   return fromRaw(raw);
+}
+
+/**
+ * Fetches a screenshot Capture's PNG bytes and returns a `blob:` object
+ * URL an `<img>` can use directly. The backend derives the file from
+ * `captureId` alone — this never sends or receives a filesystem path
+ * (see docs/architecture.md, "Safe media access"). Rejects with the
+ * usual `AppError` shape (via `getErrorMessage`/`isNotFoundError`) if the
+ * capture has no media.
+ *
+ * The caller owns the returned URL's lifetime: call
+ * `URL.revokeObjectURL(url)` once it's no longer displayed (e.g. on
+ * unmount or before fetching a different capture's media), or the blob
+ * leaks for the lifetime of the page.
+ */
+export async function getCaptureMediaUrl(captureId: string): Promise<string> {
+  const bytes = await invoke<ArrayBuffer>("get_capture_media", { id: captureId });
+  const blob = new Blob([bytes], { type: "image/png" });
+  return URL.createObjectURL(blob);
 }
 
 export async function updateCapture(input: UpdateCaptureInput): Promise<Capture> {

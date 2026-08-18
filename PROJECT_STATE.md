@@ -8,7 +8,7 @@ M0 — Foundation
 
 Completed:
 TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007,
-TASK-008
+TASK-008, TASK-009
 
 ## Current implementation
 
@@ -194,6 +194,77 @@ TASK-008
   - The Project Workspace's own "Captures" tab stays genuinely `disabled`
     — Captures belong to a Process, not directly to a Project; no
     project-wide capture list was added
+- **Real screenshot capture (TASK-009)** — the first task with real
+  media. A Screenshot Capture now has an actual PNG behind it; Note and
+  Recording Captures remain metadata only:
+  - `native::screenshot::ScreenshotEngine` trait +
+    `WindowsScreenshotEngine` (`src-tauri/src/native/screenshot.rs`):
+    captures the primary Windows display via the `xcap` crate and
+    encodes it to PNG in memory — the Native Windows functionality
+    boundary's first real occupant. No monitor picker, area/window
+    selection, or recording — deliberately scoped to "capture the
+    primary/current display" only
+  - `media::MediaStorage` (`src-tauri/src/media/mod.rs`): the file
+    storage boundary's first real occupant. Owns
+    `<app_data_dir>/captures/` (sibling of `<app_data_dir>/database/`,
+    same Tauri-resolved app-data directory, no second mechanism
+    invented). `save_capture`/`read_capture`/`delete_capture`/`exists`/
+    `reconcile`, all keyed by `Capture.id` alone — the id is validated as
+    a UUID before any path is built, which is the entire path-traversal
+    defense (a UUID string structurally cannot contain `../`, an
+    absolute path, or any unsafe character)
+  - **No database migration** — the TASK-008 `captures` schema was
+    already sufficient (metadata only, as intentionally designed); the
+    PNG is filesystem data, never stored in SQLite
+  - `CaptureService::create_screenshot` (new): validates title/
+    description, confirms the parent Process exists, captures the
+    screen, saves the PNG, then creates the metadata row — orchestrated
+    (not a DB transaction, since the media is filesystem data) so that a
+    capture-engine failure leaves nothing behind, and a metadata-insert
+    failure after a successful PNG write cleans that PNG back up
+  - `CaptureService::delete` (extended): deletes metadata first, then
+    best-effort deletes the media file — graceful no-op if there wasn't
+    one (Note/Recording), never surfaces a raw filesystem error
+  - `CaptureService::reconcile_media` (new) + `CaptureRepository::
+    list_all_ids` (new): a startup sweep (called once from `lib.rs`'s
+    `.setup()`) that removes any `.png` file under `captures/` whose
+    Capture id no longer exists in the database — the documented answer
+    to Project/Process cascade deletes, which only ever removed
+    *metadata* rows (SQLite has no idea files exist). **Documented
+    limitation:** a cascade-orphaned PNG is removed at next app startup,
+    not the instant the cascade happens; direct Capture deletion (the
+    common case) remains synchronous
+  - New Tauri commands `create_screenshot_capture` (explicit
+    `CreateScreenshotInput { process_id, title, description }` — no
+    `capture_type` field at all; a screenshot operation can only ever
+    produce `type: "screenshot"`) and `get_capture_media` (returns
+    `tauri::ipc::Response` — raw bytes, not a JSON array — keyed only by
+    Capture id; the frontend never sends or receives a filesystem path)
+  - One new `AppError` variant, `Capture(String)` (native capture-engine
+    failures — no display available, PNG encode failure); filesystem
+    failures storing media reuse the existing `Storage` variant
+  - New dependency: `xcap` (`image` feature) — see docs/architecture.md
+    §15 for the full why/alternatives-considered entry
+  - Frontend service additions
+    (`features/projects/services/captures.ts`): `createScreenshotCapture`
+    and `getCaptureMediaUrl` (fetches PNG bytes, returns a `blob:` object
+    URL, documents that the caller must revoke it)
+  - `CreateCaptureDialog`: when Type is Screenshot, shows a "This will
+    capture your current screen." hint and the primary button reads
+    "Capture screenshot"/"Capturing…", calling the new screenshot
+    operation instead of the generic metadata-only one; Note/Recording
+    behavior is unchanged from TASK-008
+  - `CaptureDetail`: for `type === "screenshot"`, fetches and shows the
+    PNG (loading/error states, bounded/aspect-preserving `<img>`) between
+    the description and the type/date row; Note/Recording render nothing
+    new
+  - Editing a Screenshot Capture's type away from `screenshot` (existing
+    generic Edit dialog) does **not** delete or move its PNG — the file
+    is keyed by `Capture.id`, not `capture_type`, so it simply becomes
+    unreachable through the UI until/unless the type is changed back
+    (documented decision, not an oversight — see DECISIONS.md)
+  - Project Workspace's "Captures" tab remains genuinely `disabled` —
+    untouched by this task
 - Settings placeholder page — empty state, no other settings implemented
 - Reusable application layout components (`AppShell`, `Sidebar`, `Header`
   in `src/components/layout/`) and one reused generic UI component
@@ -557,11 +628,106 @@ separate `DbService` instances. The compiled binary was confirmed to
 start and keep running cleanly against the real, migrated per-user
 `%APPDATA%\com.golive.app\` database.
 
+**TASK-009 validation:** `npx tsc --noEmit`, `npm run build`, `cargo
+check` (no warnings), `cargo test` (117/117 passing — 95 pre-existing +
+22 new: 11 `media::tests` covering directory creation/idempotence,
+save/read round-trip, exists, filename-from-id, missing-file read/delete
+handled gracefully, path-traversal rejected for several malicious ids,
+reconcile removing only orphaned `.png` files, reconcile on a missing
+directory; 1 new repository test (`list_all_ids`); 10 new service tests
+covering metadata-only `create` never touching media, end-to-end
+`create_screenshot`, missing-process/empty-title rejection, the two
+transactional-cleanup cases (engine failure leaves nothing behind;
+metadata-insert failure after a successful PNG write cleans the PNG back
+up), a type-change preserving media, delete removing both metadata and
+media, deleting a metadata-only capture with no media succeeding
+gracefully, and cascade-orphan reconciliation), and `npm run tauri build`
+all pass.
+
+Full UI-flow verification (Captures section → "+ New capture" → Type
+defaults to Screenshot, hint text and "Capture screenshot" button
+confirmed → submit → capture created, auto-selected, `<img>` renders a
+real decoded PNG via a `blob:` object URL fetched through
+`get_capture_media` → Edit: change Type to Note → Save → preview
+disappears from the UI but the mock backend's media map still holds the
+bytes (confirmed via `window.__mockMedia`) → Edit again, change Type back
+to Screenshot → Save → the *same* image reappears, proving media survives
+a round-trip type change → Delete requires confirmation → confirmed
+deletion removes both the Capture and its entry from
+`window.__mockMedia`, and the empty state returns) was verified against
+the Vite dev server with the same mocked-`window.__TAURI_INTERNALS__.invoke`
+approach as prior tasks, extended with a `create_screenshot_capture`
+handler (asserting the real command's exact input shape — no
+`capture_type` field) and a `get_capture_media` handler returning
+in-memory bytes for a real, valid 1×1 PNG.
+
+**Native screenshot capture — manually verified, not simulated:**
+- `native::screenshot::tests::capture_primary_display_smoke_test`
+  (`#[ignore]`d — real display capture can't be assumed available in
+  every environment `cargo test` runs in) was run explicitly
+  (`cargo test --release -- --ignored capture_primary_display_smoke_test`)
+  in this session's environment and **passed**: `WindowsScreenshotEngine`
+  found one real monitor (`\\.\DISPLAY1`, 1920×1080, primary) and
+  produced a valid PNG.
+- A further one-off spot-check (`examples/screenshot_spotcheck.rs`,
+  written temporarily and deleted before commit — same pattern as
+  TASK-004 through TASK-008's real-environment checks) wrote the captured
+  PNG to disk and it was opened and visually inspected: it is a genuine,
+  correct screenshot of this session's real Windows desktop (not a
+  black/blank frame, not a placeholder) — content specific to the actual
+  desktop was visible in the captured image, satisfying this task's
+  requirement to confirm real desktop content, not just a non-empty byte
+  count.
+- A second temporary example (`examples/appdata_spotcheck.rs`, also
+  deleted before commit; `lib.rs`'s modules were briefly widened to
+  `pub` to let it reach `CaptureService`/`MediaStorage` directly, then
+  reverted immediately after — same temporary-widening approach implied
+  by TASK-004 through TASK-008's real-`AppData` checks) exercised the
+  full **production** pipeline as three separate process invocations
+  against the real `%APPDATA%\com.golive.app\` directory:
+  1. `create`: `CaptureService::create_screenshot` captured the real
+     display and wrote `captures\<id>.png` (612,536 bytes) alongside a
+     real metadata row — confirmed present on disk via a direct
+     `AppData` directory listing.
+  2. `verify` (a fresh process — simulates closing and reopening
+     GoLive): re-initialized `DbService`/`MediaStorage` from scratch and
+     confirmed both the Capture metadata and the exact same media bytes
+     were still readable — **screenshot persistence across restart,
+     proven against the real database and real filesystem, not a temp
+     directory.**
+  3. `delete` (a third fresh process): called `CaptureService::delete`
+     and confirmed both `get`/`get_screenshot_media` now report
+     `NotFound`, and confirmed via a direct directory listing that the
+     PNG file was physically removed from
+     `%APPDATA%\com.golive.app\captures\` — **media deletion, verified
+     against the real filesystem.**
+  
+  Both temporary example files and the temporary `pub` widening in
+  `lib.rs` were removed before this task was considered complete; `git
+  status` was checked afterward to confirm no stray files remained.
+- What was **not** performed: clicking through the compiled `golive.exe`'s
+  actual native window UI end-to-end (Projects → Process → Captures →
+  "Capture screenshot" button → preview → Delete) — no desktop
+  UI-automation tool is available in this environment to drive the native
+  WebView2 window directly (the Browser pane drives a real web browser
+  tab, not the Tauri window), the same limitation TASK-003/004/005 also
+  recorded. Given the above — the real capture engine verified against
+  real desktop content, and the full real production
+  `CaptureService`/`MediaStorage` pipeline verified against the real
+  `%APPDATA%` directory across separate process "restarts" — this is
+  judged sufficient evidence that the feature works correctly end to end
+  without overclaiming a native-UI click-through that could not actually
+  be performed here. A developer with an interactive desktop session
+  should still do one unassisted pass through `golive.exe`'s UI per this
+  task's own §33 checklist before relying on this in a real engagement.
+
 ## Not implemented yet
 
-- Capture media (the Capture domain, TASK-008, is metadata only — no
-  actual screenshot/recording file is captured, stored, or attached yet)
-- Screenshots (full-screen / monitor / area)
+- Recording/Note capture media (TASK-009 gave only `screenshot` real
+  media; Note and Recording Captures remain metadata only, with no
+  actual file captured, stored, or attached)
+- Monitor selection, area/window-selection screenshots (TASK-009 only
+  supports "capture the primary/current display")
 - Screen recording, microphone recording
 - Floating widget, global hotkeys
 - AI integration (OpenAI), structured process generation
@@ -575,12 +741,20 @@ start and keep running cleanly against the real, migrated per-user
 ## Known technical risks
 
 - Windows screen recording implementation (highest risk — flagged for
-  incremental proof-of-concept development)
+  incremental proof-of-concept development). Single-frame primary-display
+  screenshot capture (TASK-009) is implemented and manually verified
+  (real display content, real `%APPDATA%` persistence, real deletion —
+  see below), which de-risks the underlying native-capture library choice
+  (`xcap`) for the recording work ahead, but recording itself (continuous
+  capture, encoding, file size/performance) is unstarted and remains the
+  highest-risk item
 - Microphone capture and audio/video synchronization
-- Native screen capture across multi-monitor setups
+- Native screen capture across multi-monitor setups (TASK-009
+  deliberately supports only the primary/current display; monitor
+  selection is unstarted)
 - AI integration reliability (structured/schema-constrained output)
 - Word document generation quality for a consulting-grade deliverable
 
 ## Next task
 
-TASK-009
+TASK-010
