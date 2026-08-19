@@ -498,6 +498,9 @@ button {
 .projects-toolbar {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
 .project-list {
@@ -869,6 +872,29 @@ button {
   background-color: var(--color-surface-alt);
 }
 
+/* Start/Stop recording control (TASK-014) — a toolbar-level sibling of
+   "+ New capture", not nested in a dialog (see DECISIONS.md). */
+.recording-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.recording-control__indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-danger);
+  white-space: nowrap;
+}
+
+.recording-control__error {
+  font-size: 0.8rem;
+  color: var(--color-danger);
+}
+
 .capture-detail {
   display: flex;
   flex-direction: column;
@@ -917,6 +943,12 @@ button {
   max-width: 100%;
   max-height: 360px;
   object-fit: contain;
+}
+
+.capture-detail__video {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
 }
 
 .capture-detail__meta {

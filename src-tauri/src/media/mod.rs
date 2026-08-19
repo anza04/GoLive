@@ -101,6 +101,25 @@ impl MediaStorage {
         self.video_path(capture_id).map(|path| path.exists()).unwrap_or(false)
     }
 
+    /// Reads the full MP4 bytes for `capture_id` (TASK-014 playback) —
+    /// the Recording counterpart to `read_capture`, same
+    /// `AppError::NotFound`-for-a-missing-file behavior. A single
+    /// in-memory byte-buffer transfer, the same approach `read_capture`
+    /// already uses for PNGs — a deliberate, scoped choice (see
+    /// DECISIONS.md) rather than a streaming/range-request protocol; it
+    /// doesn't scale indefinitely to very long recordings, a limitation
+    /// PROJECT_STATE.md already flags as unmeasured.
+    pub fn read_video(&self, capture_id: &str) -> Result<Vec<u8>, AppError> {
+        let path = self.video_path(capture_id)?;
+        std::fs::read(&path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                AppError::NotFound
+            } else {
+                AppError::from(err)
+            }
+        })
+    }
+
     /// Deletes the video for `capture_id` — the Recording counterpart to
     /// `delete_capture`, with the identical "missing file is already-
     /// deleted success" behavior. Called unconditionally alongside
@@ -358,6 +377,24 @@ mod tests {
         assert!(!storage.video_exists(&id), "should not exist before it's written");
         std::fs::write(storage.video_path(&id).unwrap(), b"not a real mp4, just bytes").unwrap();
         assert!(storage.video_exists(&id), "should exist once the file is on disk");
+    }
+
+    #[test]
+    fn read_video_round_trips_the_same_bytes() {
+        let (_dir, storage) = storage_in_temp_dir();
+        let id = sample_id();
+        let bytes = vec![1, 2, 3, 4, 5];
+        std::fs::write(storage.video_path(&id).unwrap(), &bytes).unwrap();
+
+        let read_back = storage.read_video(&id).expect("read");
+        assert_eq!(read_back, bytes);
+    }
+
+    #[test]
+    fn read_missing_video_returns_not_found() {
+        let (_dir, storage) = storage_in_temp_dir();
+        let result = storage.read_video(&sample_id());
+        assert!(matches!(result, Err(AppError::NotFound)));
     }
 
     #[test]

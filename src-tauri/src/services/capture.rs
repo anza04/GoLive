@@ -247,6 +247,15 @@ impl CaptureService {
         self.media.read_capture(id)
     }
 
+    /// Returns the MP4 bytes for a Recording Capture (TASK-014
+    /// playback) — the Recording counterpart to `get_screenshot_media`,
+    /// same `AppError::NotFound`-for-no-media behavior (nonexistent
+    /// Capture, or one with no video — e.g. a Note/Screenshot, or a
+    /// Recording Capture since edited to another type).
+    pub fn get_recording_media(&self, id: &str) -> Result<Vec<u8>, AppError> {
+        self.media.read_video(id)
+    }
+
     /// Trims/validates `title`/`description`, parses `capture_type`,
     /// verifies the capture exists, and regenerates `updated_at`. `id`,
     /// `process_id`, and `created_at` are taken from the existing record —
@@ -915,6 +924,26 @@ mod tests {
 
         assert!(matches!(service.get(&capture.id), Err(AppError::NotFound)));
         assert!(!video_path.exists(), "video file must be removed on delete");
+    }
+
+    #[test]
+    fn get_recording_media_returns_the_video_bytes() {
+        let (_dir, service, process_id, media_dir) = service_with_process_and_media();
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(media_dir.join(format!("{id}.mp4")), b"fake mp4 bytes").unwrap();
+        let capture = service.finalize_recording(&id, &process_id, "Title", "").unwrap();
+
+        let media = service.get_recording_media(&capture.id).expect("media should exist");
+        assert_eq!(media, b"fake mp4 bytes");
+    }
+
+    #[test]
+    fn get_recording_media_for_a_capture_with_no_video_returns_not_found() {
+        let (_dir, service, _process_id) = service_with_process();
+        // A well-formed UUID, but no video file was ever written for it —
+        // mirrors `media::tests::read_missing_video_returns_not_found`.
+        let result = service.get_recording_media(&uuid::Uuid::new_v4().to_string());
+        assert!(matches!(result, Err(AppError::NotFound)));
     }
 
     #[test]

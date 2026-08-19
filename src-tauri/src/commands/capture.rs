@@ -123,6 +123,20 @@ pub fn get_capture_media(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// The Recording counterpart to `get_capture_media` (TASK-014): returns
+/// a Recording Capture's MP4 bytes the same way — raw binary IPC
+/// response, Capture id in, backend-derived file out, `AppError::NotFound`
+/// for both a nonexistent Capture and one with no video.
+#[tauri::command]
+pub fn get_recording_media(
+    id: String,
+    db: State<DbService>,
+    media: State<MediaStorage>,
+) -> Result<tauri::ipc::Response, AppError> {
+    let bytes = service(&db, &media).get_recording_media(&id)?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[tauri::command]
 pub fn update_capture(
     input: UpdateCaptureInput,

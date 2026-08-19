@@ -23,13 +23,14 @@
         "label": "widget",
         "title": "GoLive Capture",
         "url": "widget.html",
-        "width": 260,
-        "height": 210,
+        "width": 56,
+        "height": 56,
         "resizable": false,
         "alwaysOnTop": true,
         "decorations": false,
+        "transparent": true,
         "skipTaskbar": true,
-        "shadow": true,
+        "shadow": false,
         "visible": true,
         "focus": false
       }

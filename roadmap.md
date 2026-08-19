@@ -198,7 +198,7 @@ across restart, deleted alongside its metadata — same guarantees
 TASK-009 proved for PNGs, now proved for video via equivalent automated
 + manual verification.
 
-### TASK-014 — Recording UI and playback
+### TASK-014 — Recording UI and playback ✅ DONE
 
 **Depends on:** TASK-013.
 **Goal:** Make screen recording actually usable end to end.

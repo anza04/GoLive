@@ -1,14 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Dialog } from "../../../components/ui/Dialog";
 import { getErrorMessage } from "../../../utils/errorMessage";
-import {
-  createCapture,
-  createScreenshotCapture,
-  startRecordingCapture,
-  stopRecordingCapture,
-  type Capture,
-  type CaptureType,
-} from "../services/captures";
+import { createCapture, createScreenshotCapture, type Capture, type CaptureType } from "../services/captures";
 
 interface CreateCaptureDialogProps {
   processId: string;
@@ -16,9 +9,16 @@ interface CreateCaptureDialogProps {
   onCreated: (capture: Capture) => void;
 }
 
+// "recording" is deliberately not an option here (TASK-014): a Recording
+// Capture is now always created through the dedicated Start/Stop
+// recording control in `CapturesSection`'s toolbar (and the widget),
+// never through this dialog's generic metadata-only path — a "recording"
+// Capture with no video file behind it would be a confusing dead end in
+// `CaptureDetail`'s player (see DECISIONS.md). Screenshot already
+// followed this same rule since TASK-009 (its own dedicated real-media
+// operation, not the generic path either).
 const TYPE_OPTIONS: { value: CaptureType; label: string }[] = [
   { value: "screenshot", label: "Screenshot" },
-  { value: "recording", label: "Recording" },
   { value: "note", label: "Note" },
 ];
 
@@ -29,23 +29,9 @@ export function CreateCaptureDialog({ processId, onClose, onCreated }: CreateCap
   const [description, setDescription] = useState("");
   const [captureType, setCaptureType] = useState<CaptureType>("screenshot");
   const [submitting, setSubmitting] = useState(false);
-  // Only meaningful while captureType === "recording": whether
-  // `start_recording_capture` has already succeeded, i.e. a real
-  // recording is currently in progress on the backend and the primary
-  // button's next click should *stop* it rather than start a new one
-  // (TASK-013's two-phase flow — see `services/captures.ts`).
-  const [recordingStarted, setRecordingStarted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isScreenshot = captureType === "screenshot";
-  const isRecording = captureType === "recording";
-  // Once a real recording has started, the request that started it
-  // (title/description/type) can no longer be changed or abandoned via
-  // Cancel — doing either would leave an in-progress native recording
-  // that nothing ever stops. The user must click through to Stop; the
-  // orphan-cleanup sweep (`MediaStorage::reconcile`) is the safety net
-  // if the whole app is closed before that happens (see DECISIONS.md).
-  const fieldsLocked = submitting || recordingStarted;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -54,20 +40,6 @@ export function CreateCaptureDialog({ processId, onClose, onCreated }: CreateCap
     setSubmitting(true);
     setError(null);
     try {
-      if (isRecording && !recordingStarted) {
-        const trimmedDescription = description.trim() === "" ? undefined : description;
-        await startRecordingCapture({ processId, title, description: trimmedDescription });
-        setRecordingStarted(true);
-        setSubmitting(false);
-        return;
-      }
-
-      if (isRecording && recordingStarted) {
-        const capture = await stopRecordingCapture();
-        onCreated(capture);
-        return;
-      }
-
       const trimmedDescription = description.trim() === "" ? undefined : description;
       // Screenshot goes through the dedicated real-media operation
       // (captures the Windows display, stores the PNG, then creates the
@@ -84,17 +56,8 @@ export function CreateCaptureDialog({ processId, onClose, onCreated }: CreateCap
     }
   }
 
-  function primaryButtonLabel(): string {
-    if (isScreenshot) return submitting ? "Capturing…" : "Capture screenshot";
-    if (isRecording) {
-      if (recordingStarted) return submitting ? "Stopping…" : "Stop recording";
-      return submitting ? "Starting…" : "Start recording";
-    }
-    return submitting ? "Creating…" : "Create capture";
-  }
-
   return (
-    <Dialog title="New capture" onClose={onClose} closable={!submitting && !recordingStarted}>
+    <Dialog title="New capture" onClose={onClose} closable={!submitting}>
       <form className="dialog__body" onSubmit={handleSubmit}>
         <div className="field">
           <label className="field__label" htmlFor="capture-title">
@@ -108,7 +71,7 @@ export function CreateCaptureDialog({ processId, onClose, onCreated }: CreateCap
             maxLength={200}
             autoFocus
             required
-            disabled={fieldsLocked}
+            disabled={submitting}
           />
         </div>
 
@@ -123,7 +86,7 @@ export function CreateCaptureDialog({ processId, onClose, onCreated }: CreateCap
             onChange={(event) => setDescription(event.target.value)}
             maxLength={5000}
             rows={3}
-            disabled={fieldsLocked}
+            disabled={submitting}
           />
         </div>
 
@@ -136,7 +99,7 @@ export function CreateCaptureDialog({ processId, onClose, onCreated }: CreateCap
             className="field__input"
             value={captureType}
             onChange={(event) => setCaptureType(event.target.value as CaptureType)}
-            disabled={fieldsLocked}
+            disabled={submitting}
           >
             {TYPE_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
@@ -147,13 +110,6 @@ export function CreateCaptureDialog({ processId, onClose, onCreated }: CreateCap
           {isScreenshot && (
             <p className="field__hint">This will capture your current screen.</p>
           )}
-          {isRecording && (
-            <p className="field__hint">
-              {recordingStarted
-                ? "Recording your primary display — click Stop recording when you're done."
-                : "This will record your primary display until you click Stop recording."}
-            </p>
-          )}
         </div>
 
         {error && (
@@ -163,11 +119,11 @@ export function CreateCaptureDialog({ processId, onClose, onCreated }: CreateCap
         )}
 
         <div className="dialog__footer">
-          <button type="button" className="button" onClick={onClose} disabled={submitting || recordingStarted}>
+          <button type="button" className="button" onClick={onClose} disabled={submitting}>
             Cancel
           </button>
           <button type="submit" className="button button--primary" disabled={submitting}>
-            {primaryButtonLabel()}
+            {submitting ? (isScreenshot ? "Capturing…" : "Creating…") : isScreenshot ? "Capture screenshot" : "Create capture"}
           </button>
         </div>
       </form>

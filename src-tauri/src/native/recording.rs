@@ -13,7 +13,9 @@
 use crate::errors::AppError;
 use std::path::Path;
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
-use windows_capture::encoder::{AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder};
+use windows_capture::encoder::{
+    AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder, VideoSettingsSubType,
+};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::monitor::Monitor;
@@ -108,7 +110,16 @@ impl GraphicsCaptureApiHandler for RecordingHandlerImpl {
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         let encoder = VideoEncoder::new(
-            VideoSettingsBuilder::new(ctx.flags.width, ctx.flags.height),
+            // `VideoSettingsBuilder::new` defaults to `VideoSettingsSubType::HEVC`
+            // if `.sub_type(...)` isn't called — H.265 in an MP4 container,
+            // which Chromium/WebView2 (GoLive's playback surface,
+            // `CaptureDetail`'s `<video>` element, TASK-014) does **not**
+            // decode without extra OS codec packs, so a recording made
+            // with the library's own default would silently fail to
+            // play. H.264 is universally supported by Chromium's built-in
+            // decoder, so it's set explicitly here rather than relying on
+            // the crate's default (see DECISIONS.md).
+            VideoSettingsBuilder::new(ctx.flags.width, ctx.flags.height).sub_type(VideoSettingsSubType::H264),
             AudioSettingsBuilder::default().disabled(true),
             ContainerSettingsBuilder::default(),
             &ctx.flags.output_path,

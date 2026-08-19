@@ -1,6 +1,11 @@
-//! In-progress screen-recording state (TASK-013): a small piece of
-//! Tauri-managed state bridging the two-phase `start_recording_capture`/
-//! `stop_recording_capture` commands (see `commands::recording`).
+//! In-progress screen-recording state (TASK-013, extended TASK-014): a
+//! small piece of Tauri-managed state bridging the two-phase
+//! `start_recording_capture`/`stop_recording_capture` commands, and
+//! (TASK-014) the cross-window "is a recording in progress, and for how
+//! long" mirror the floating widget and the main window's Captures
+//! section both read — the same cross-window problem
+//! `active_process::ActiveProcessState` already solved for "which
+//! Process is active" (see docs/architecture.md).
 //!
 //! `CaptureService` is deliberately stateless — a fresh instance is
 //! built for every command (see `commands::capture::service` and
@@ -8,28 +13,44 @@
 //! backed by shared state" shape `db::DbPool`/`media::MediaStorage`
 //! already use. A recording's in-progress `RecordingHandle`, however,
 //! has to survive between the `start` and `stop` commands — two
-//! completely separate IPC calls — so it lives here instead, mirroring
-//! `active_process::ActiveProcessState`'s shape (a small
-//! `Mutex`-protected value managed via `app.manage(...)`).
+//! completely separate IPC calls — so it lives here instead.
 //!
 //! Deliberately supports **at most one recording at a time, system-wide**
 //! — no per-Process/per-window keying, no queue. See DECISIONS.md for
-//! why this is the right scope for TASK-013 rather than a limitation to
-//! work around.
+//! why this is the right scope rather than a limitation to work around.
 
 use crate::errors::AppError;
 use crate::native::recording::RecordingHandle;
+use serde::Serialize;
 use std::sync::Mutex;
 
-/// Everything needed to finalize a recording once it's stopped: the
-/// pre-generated Capture id the video file was written under (see
-/// `media::MediaStorage::video_path`), the owning process, the
-/// already-validated/trimmed title/description carried forward from
-/// `start_recording_capture`, and the live native handle.
-pub struct InProgressRecording {
+/// The read-only, cloneable "is a recording in progress, and which one"
+/// shape — everything a window needs to render a Start/Stop control and
+/// an elapsed-time indicator, but not the live native handle itself
+/// (which can't be cloned). This is both `start_recording_capture`'s
+/// return value and `recording-status-changed`'s event payload (see
+/// `commands::recording`) — the same "one struct, both the state and the
+/// wire shape" pattern `active_process::ActiveProcessInfo` already uses.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordingStatusInfo {
     pub id: String,
     pub process_id: String,
     pub title: String,
+    /// Unix epoch milliseconds (UTC) — when the recording started.
+    /// Elapsed-time display is computed client-side (`Date.now() -
+    /// startedAt`, ticked with `setInterval`); the backend never sends a
+    /// pre-formatted duration string, the same "timestamps are raw, the
+    /// frontend formats" rule every other display date in the app
+    /// follows (see `utils/formatDate`).
+    pub started_at: i64,
+}
+
+/// Everything needed to finalize a recording once it's stopped: the
+/// cloneable status above (id, process, title, start time), the
+/// already-validated/trimmed description carried forward from
+/// `start_recording_capture`, and the live native handle.
+pub struct InProgressRecording {
+    pub status: RecordingStatusInfo,
     pub description: Option<String>,
     pub handle: Box<dyn RecordingHandle>,
 }
@@ -44,10 +65,10 @@ impl RecordingState {
     /// holding the lock, so two concurrent `start_recording_capture`
     /// calls can never both pass the "nothing in progress" check and
     /// both start a real native recording (only one would ever be
-    /// stored, silently leaking the other's capture thread). Returns the
-    /// `(id, process_id, title)` of the recording that was started, for
-    /// the command to build its response from.
-    pub fn start<F>(&self, start: F) -> Result<(String, String, String), AppError>
+    /// stored, silently leaking the other's capture thread). Returns a
+    /// clone of the stored status for the command to build its response
+    /// (and broadcast event) from.
+    pub fn start<F>(&self, start: F) -> Result<RecordingStatusInfo, AppError>
     where
         F: FnOnce() -> Result<InProgressRecording, AppError>,
     {
@@ -59,9 +80,9 @@ impl RecordingState {
         }
 
         let recording = start()?;
-        let info = (recording.id.clone(), recording.process_id.clone(), recording.title.clone());
+        let status = recording.status.clone();
         *guard = Some(recording);
-        Ok(info)
+        Ok(status)
     }
 
     /// Takes the in-progress recording, if any, leaving `None` behind —
@@ -72,7 +93,24 @@ impl RecordingState {
         let mut guard = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.take()
     }
+
+    /// Reads the current status without consuming anything — lets a
+    /// window that just opened (or wasn't listening for the last
+    /// `recording-status-changed` event) fetch "is a recording in
+    /// progress right now" on mount, the same role
+    /// `active_process::ActiveProcessState::get` plays for the active
+    /// Process.
+    pub fn status(&self) -> Option<RecordingStatusInfo> {
+        let guard = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.as_ref().map(|recording| recording.status.clone())
+    }
 }
+
+/// Emitted (via `AppHandle::emit`, Rust-side — not gated by the frontend
+/// ACL) to every window whenever a recording starts or stops. Payload is
+/// `Option<RecordingStatusInfo>` — `null` means no recording is in
+/// progress.
+pub const RECORDING_STATUS_CHANGED_EVENT: &str = "recording-status-changed";
 
 #[cfg(test)]
 mod tests {
@@ -91,22 +129,26 @@ mod tests {
 
     fn sample_recording() -> InProgressRecording {
         InProgressRecording {
-            id: "capture-1".to_string(),
-            process_id: "process-1".to_string(),
-            title: "My recording".to_string(),
+            status: RecordingStatusInfo {
+                id: "capture-1".to_string(),
+                process_id: "process-1".to_string(),
+                title: "My recording".to_string(),
+                started_at: 1000,
+            },
             description: None,
             handle: Box::new(FakeHandle { stopped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)) }),
         }
     }
 
     #[test]
-    fn start_stores_the_recording_and_returns_its_info() {
+    fn start_stores_the_recording_and_returns_its_status() {
         let state = RecordingState::default();
-        let (id, process_id, title) = state.start(|| Ok(sample_recording())).expect("start");
+        let status = state.start(|| Ok(sample_recording())).expect("start");
 
-        assert_eq!(id, "capture-1");
-        assert_eq!(process_id, "process-1");
-        assert_eq!(title, "My recording");
+        assert_eq!(status.id, "capture-1");
+        assert_eq!(status.process_id, "process-1");
+        assert_eq!(status.title, "My recording");
+        assert_eq!(status.started_at, 1000);
     }
 
     #[test]
@@ -136,7 +178,7 @@ mod tests {
 
         let taken = state.take();
         assert!(taken.is_some());
-        assert_eq!(taken.unwrap().id, "capture-1");
+        assert_eq!(taken.unwrap().status.id, "capture-1");
 
         assert!(state.take().is_none(), "a second take must find nothing left");
     }
@@ -148,5 +190,18 @@ mod tests {
         state.take();
 
         state.start(|| Ok(sample_recording())).expect("start after take should succeed");
+    }
+
+    #[test]
+    fn status_reflects_the_current_in_progress_recording() {
+        let state = RecordingState::default();
+        assert!(state.status().is_none(), "nothing in progress yet");
+
+        state.start(|| Ok(sample_recording())).expect("start");
+        let status = state.status().expect("a recording is in progress");
+        assert_eq!(status.id, "capture-1");
+
+        state.take();
+        assert!(state.status().is_none(), "nothing left after take");
     }
 }

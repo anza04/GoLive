@@ -1318,3 +1318,211 @@ no way to cancel/discard an in-progress recording from the UI. This
 matches TASK-013's explicitly minimal scope ("no polish"); a cleaner
 cancel-and-discard affordance is left to TASK-014 if real use shows it's
 needed.
+
+## TASK-014 — Recording UI and playback
+
+**Decision:** Start/Stop recording was moved out of `CreateCaptureDialog`
+entirely (TASK-013's in-dialog two-phase flow) into a toolbar-level
+control in `CapturesSection`, sitting next to "+ New capture" — and
+`CreateCaptureDialog`'s Type dropdown no longer offers "Recording" at
+all, leaving only Screenshot/Note.
+**Reason:** the roadmap step lists "the Captures section" and "the
+floating widget" as the two places a Start/Stop control belongs — not
+"the Create Capture dialog" — and a modal dialog is fundamentally the
+wrong shape for a long-running action: it blocks navigating to other
+captures, switching tabs, or doing anything else in the app for however
+long the recording runs, which directly fights the step's own goal
+("make screen recording actually usable end to end") and its explicit
+requirement for a visible in-progress indicator. Once Start/Stop lives
+at the toolbar level, letting the dialog *also* offer a "Recording" type
+would be actively confusing — a Capture created that way would be
+`type: "recording"` with no video file behind it (the real recording
+only ever happens through the toolbar control), a dead end in
+`CaptureDetail`'s new video player. Screenshot already followed this
+"real media types get their own dedicated operation, never the generic
+metadata-only dialog path" rule since TASK-009; this makes Recording
+consistent with it.
+**Consequence:** a Recording Capture can now only ever be created
+through the dedicated Start/Stop control (Captures section or widget) —
+never through the generic dialog — so every Recording Capture that
+exists is guaranteed to have gone through the real record-and-finalize
+pipeline, with a real video file. `CreateCaptureDialog` shrank back
+toward its TASK-009-era shape (Screenshot/Note only); its recording-
+specific state/branches from TASK-013 were removed rather than kept
+dormant.
+
+**Decision:** recording status (`recording::RecordingStatusInfo` — id,
+process, title, `started_at`) is broadcast to every window via a new
+`recording-status-changed` event, the same `AppHandle::emit` +
+`get_*_status` "current value on mount, then live pushes" pattern
+`active_process::ActiveProcessState`/`ACTIVE_PROCESS_CHANGED_EVENT`
+already established for the active Process (TASK-011), rather than each
+window polling `get_recording_status` on an interval.
+**Reason:** the exact same reasoning DECISIONS.md already recorded for
+the active-Process sync applies unchanged here: Tauri windows share no
+JS memory, a recording can be started from either the main window's
+Captures section or the widget, and *both* need to reflect "is a
+recording in progress, and for how long" regardless of which one
+started it — polling would mean a visible delay before the other window
+picks up the change (or wasted IPC calls), and event-push is the
+already-proven, already-built mechanism for exactly this shape of
+problem.
+**Consequence:** `commands::recording::start_recording_capture`/
+`stop_recording_capture` each emit `recording-status-changed` in
+addition to returning their own result — `stop_recording_capture`
+specifically emits `None` *immediately after* `RecordingState::take()`
+(before calling `handle.stop()`/`finalize_recording`, both of which can
+still fail) so no window is ever left showing a ticking "recording in
+progress" indicator for a recording that isn't running anymore, even if
+finalizing the file afterward doesn't succeed.
+
+**Decision:** `RecordingStatusInfo` carries a raw `started_at` (epoch
+ms, UTC), and elapsed-time display is computed and ticked entirely on
+the frontend (`hooks/useElapsedSeconds`, `setInterval` recomputing
+`Date.now() - startedAt` once a second) — the backend never sends a
+pre-formatted duration string or ticks anything itself.
+**Consequence/Reason:** this is the same "backend sends raw timestamps,
+formatting happens only in the frontend" rule `utils/formatDate` already
+established for every other displayed date in the app (see
+docs/architecture.md) — an elapsed duration is really just "now minus a
+timestamp," so treating it as a formatting concern rather than
+inventing a backend-side ticking mechanism (which would mean either the
+backend pushing an event every second, wasteful, or the backend
+tracking "current elapsed" state that's stale the instant it's read)
+keeps the two ends symmetric and the backend simpler.
+
+**Decision:** `hooks/` is a new top-level frontend folder — its first
+occupant, `useElapsedSeconds`, is shared by exactly two call sites (the
+Captures section's toolbar control and the floating widget).
+**Reason:** this project's established convention is "shared code only
+once genuinely needed by multiple call sites, not scaffolded ahead of
+need" (see docs/architecture.md, "Architecture conventions") — two real,
+independent components needing identical second-by-second ticking logic
+crossed that bar; duplicating a `setInterval`/cleanup effect twice would
+have been the kind of copy-paste this project's conventions exist to
+avoid.
+**Consequence:** `src/hooks/` joins `components/`, `features/`, `pages/`,
+`services/`, `stores/`, `types/`, `utils/` as a real, non-placeholder
+top-level folder — a small, deliberate structural addition, not scope
+creep (the folder holds exactly one small hook).
+
+**Decision:** `get_recording_media`/`get_capture_media`'s Recording
+counterpart transfers a Recording Capture's full MP4 as one in-memory
+byte buffer (`tauri::ipc::Response`, blob URL on the frontend) — the
+identical approach `get_capture_media` already uses for PNGs — rather
+than adopting a streaming/range-request delivery mechanism (e.g.
+Tauri's built-in `asset:` protocol, which supports HTTP range requests
+and would let the webview stream/seek a large file without loading it
+all into memory first).
+**Reason:** the roadmap step explicitly asked this to be *evaluated*,
+not mandated either way. A full in-memory transfer was chosen because
+(a) it requires zero new capability/protocol surface — reusing the exact
+pattern already proven for screenshots keeps this task's actual size
+small, matching the project's "small, incremental steps" discipline; (b)
+HTML5 `<video>` playback over a `blob:` URL already supports seeking
+within the player *for free*, since the whole file is already resident
+in memory as a `Blob` once loaded — the common assumption that only
+range-request streaming enables seeking doesn't hold for a blob source,
+so the main real advantage of the alternative (seeking) isn't actually
+lost; (c) Tauri's `asset:` protocol requires exposing a real filesystem
+path to the frontend via `convertFileSrc`, which cuts against this
+project's established "the frontend never sees a filesystem path, only
+a Capture id" rule (see docs/architecture.md, "Safe media access") and
+would have meant reworking that boundary for one feature.
+**Consequence:** playback has to wait for the *entire* video file to
+transfer before it can start (no progressive start), and memory usage
+temporarily doubles (once in Rust, once copied into the JS `Blob`) —
+acceptable for the short-to-moderate recordings this MVP phase is
+exercising, but explicitly flagged (PROJECT_STATE.md, "Known technical
+risks") as unmeasured for a realistic multi-minute consulting session;
+revisit with a streaming approach if real usage shows this doesn't
+scale.
+
+## TASK-014 bugfixes — video playback and widget dot/drag
+
+Found by manual use immediately after TASK-014 was reported done: video
+playback didn't work at all, and the widget window couldn't be dragged
+and didn't look like the small "dot" originally envisioned. All three
+were real bugs, not follow-up feature requests — fixed before moving on
+to TASK-015, and recorded here rather than folded silently into
+TASK-014's own entry above so the mistakes and how they were actually
+diagnosed stay visible.
+
+**Decision:** `native::recording::WindowsRecordingEngine` now explicitly
+sets `VideoSettingsBuilder::sub_type(VideoSettingsSubType::H264)`,
+instead of relying on `windows-capture`'s own default.
+**Reason:** this was the actual root cause of "video playback doesn't
+work at all" — `VideoSettingsBuilder::new(...)` defaults to
+`VideoSettingsSubType::HEVC` (H.265) when `.sub_type(...)` isn't called,
+which was never verified during TASK-013: that task's own native
+verification checked that the output was a *well-formed MP4 container*
+(a correct `ftyp`/`mp42` box header) but never checked *which codec* was
+inside it, and TASK-014 built `CaptureDetail`'s `<video>` player on top
+without separately testing real playback either — both tasks'
+"verified" claims were narrower than they read. Chromium/WebView2 (the
+engine both GoLive's main window and the video player run on) has no
+built-in HEVC decoder — Google has never licensed HEVC into stock
+Chromium — so every recording silently failed to decode, with no error
+surfaced anywhere obvious (an unsupported-codec `<video>` element just
+shows nothing, not a thrown exception). H.264 is universally supported
+by Chromium's built-in decoder.
+**Consequence:** confirmed with a real recording, not just re-reading
+the docs — a temporary spot-check (`examples/recording_codec_spotcheck.rs`,
+deleted before this fix was considered complete, same temporary-`pub`-
+widening convention as every prior native spot-check) scanned the raw
+MP4 bytes for the codec's sample-entry FourCC and found `avc1` (H.264)
+present and `hvc1`/`hev1` (HEVC) absent — decisive proof, not an
+assumption. **Lesson applied going forward:** "the container is
+well-formed" and "the codec inside it is playable in the app's actual
+playback surface" are two different claims — a future recording/media
+task should verify both explicitly, not treat container validity as a
+proxy for playability.
+
+**Decision:** the widget's capability file gained
+`core:window:allow-start-dragging`.
+**Reason:** this was the actual root cause of "the window isn't
+moveable" — `data-tauri-drag-region` (already present on the widget's
+header since TASK-011) silently does nothing without this exact
+permission; it was never part of `core:default`, and TASK-011's
+capability file only ever added `core:event:allow-listen` on top of
+`core:default`, so dragging was never actually granted despite the
+markup looking correct. This is the same category of mistake
+DECISIONS.md's TASK-011 entries already flagged once (`core:window:
+allow-hide`/`allow-show` not being in `core:default` either) — worth
+double-checking permission requirements against Tauri's own ACL
+reference rather than assuming a documented HTML attribute "just works."
+**Consequence:** dragging now works from both the collapsed dot and the
+expanded panel's header, since both carry `data-tauri-drag-region` and
+the capability now actually grants the permission that attribute needs.
+
+**Decision:** the widget window's default size was changed to 56×56
+(down from the expanded panel's 260×250) and a new `set_widget_expanded`
+command resizes it between a collapsed "dot" and the expanded panel;
+`Widget.tsx` renders a small circular button in the collapsed state
+that expands on click, and a new "–" header button collapses back
+(distinct from "×", which still fully hides the window via the
+existing `hide_widget`/tray flow).
+**Reason:** matches what was actually asked for — a small draggable dot
+as the resting state, expanding to the full panel on click — and
+resizing the real OS window (rather than keeping one large window and
+hiding content with CSS) means the dot is a genuinely small, unobtrusive
+window, not a large invisible click-target with a small painted circle
+inside it, which would still visually and functionally behave like a
+full-size floating window blocking/covering whatever's underneath it.
+**Consequence (a second real bug found during this fix's own
+verification, not assumed away):** Windows enforces a minimum top-level
+window width (`SM_CXMIN`, confirmed ~130px on this machine) regardless
+of what `tauri.conf.json`/`set_size` request — requesting 56×56
+actually yields a ~133×56 window (width floored, height passed through
+since `SM_CYMIN` is much smaller). Native `WM_GETMINMAXINFO`
+interception could remove this floor but is real native Win32
+subclassing work disproportionate to what a "make it look like a dot"
+fix warrants. Instead, `.widget-dot` is centered within whatever width
+the window actually ends up with (`position: fixed` + a centering
+transform) — the extra width is transparent and has no click handler or
+drag region of its own, so it's invisible and inert; only the circle
+itself responds to clicks/dragging. Verified geometrically (not just
+assumed): the dot's `getBoundingClientRect()` was checked against a
+134×56 viewport (a browser-based stand-in for the OS-floored window
+size, since no native-window screenshot tool exists in this
+environment) and confirmed centered to within rounding.

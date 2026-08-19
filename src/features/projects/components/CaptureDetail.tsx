@@ -3,7 +3,7 @@ import { formatDate } from "../../../utils/formatDate";
 import { getErrorMessage } from "../../../utils/errorMessage";
 import { CaptureTypeBadge } from "./CaptureTypeBadge";
 import { EditCaptureDialog } from "./EditCaptureDialog";
-import { getCaptureMediaUrl, type Capture } from "../services/captures";
+import { getCaptureMediaUrl, getRecordingMediaUrl, type Capture } from "../services/captures";
 
 interface CaptureDetailProps {
   capture: Capture;
@@ -24,12 +24,14 @@ export function CaptureDetail({ capture, onUpdated, onDeleteRequested, onGone }:
   const [editOpen, setEditOpen] = useState(false);
   const [media, setMedia] = useState<MediaState>({ state: "none" });
 
-  // Fetches the PNG fresh whenever the selected capture (or its type)
+  // Fetches the media fresh whenever the selected capture (or its type)
   // changes — never cached in component state beyond this effect's
   // lifetime, since the object URL must be revoked once it's no longer
-  // shown (see `services/captures.ts`, `getCaptureMediaUrl`).
+  // shown (see `services/captures.ts`, `getCaptureMediaUrl`/
+  // `getRecordingMediaUrl`). Screenshot and Recording captures share
+  // this one effect/state — only which fetch function is called differs.
   useEffect(() => {
-    if (capture.type !== "screenshot") {
+    if (capture.type !== "screenshot" && capture.type !== "recording") {
       setMedia({ state: "none" });
       return;
     }
@@ -40,7 +42,10 @@ export function CaptureDetail({ capture, onUpdated, onDeleteRequested, onGone }:
 
     void (async () => {
       try {
-        const url = await getCaptureMediaUrl(capture.id);
+        const url =
+          capture.type === "screenshot"
+            ? await getCaptureMediaUrl(capture.id)
+            : await getRecordingMediaUrl(capture.id);
         if (cancelled) {
           URL.revokeObjectURL(url);
           return;
@@ -91,6 +96,22 @@ export function CaptureDetail({ capture, onUpdated, onDeleteRequested, onGone }:
           )}
           {media.state === "ready" && (
             <img className="capture-detail__image" src={media.url} alt={capture.title} />
+          )}
+        </div>
+      )}
+
+      {capture.type === "recording" && (
+        <div className="capture-detail__media">
+          {media.state === "loading" && <p className="projects-status">Loading recording…</p>}
+          {media.state === "error" && (
+            <p className="dialog__error" role="alert">
+              {media.message}
+            </p>
+          )}
+          {media.state === "ready" && (
+            // eslint-disable-next-line jsx-a11y/media-has-caption -- no
+            // transcript exists yet for a raw screen recording (TASK-015+).
+            <video className="capture-detail__video" src={media.url} controls />
           )}
         </div>
       )}

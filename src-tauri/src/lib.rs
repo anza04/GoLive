@@ -127,11 +127,14 @@ pub fn run() {
             commands::capture::delete_capture,
             commands::capture::create_screenshot_capture,
             commands::capture::get_capture_media,
+            commands::capture::get_recording_media,
             commands::active_process::sync_active_process,
             commands::active_process::get_active_process,
             commands::widget::hide_widget,
+            commands::widget::set_widget_expanded,
             commands::recording::start_recording_capture,
             commands::recording::stop_recording_capture,
+            commands::recording::get_recording_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

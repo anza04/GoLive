@@ -1,14 +1,21 @@
-//! Thin Tauri-facing commands for TASK-013's two-phase screen-recording
-//! flow. `start_recording_capture` validates the request and starts a
-//! real native recording (`native::recording::WindowsRecordingEngine`),
-//! storing its in-progress handle in the Tauri-managed `RecordingState`
-//! (see `recording.rs`) rather than in `CaptureService`, which is
+//! Thin Tauri-facing commands for the two-phase screen-recording flow
+//! (TASK-013, extended TASK-014). `start_recording_capture` validates
+//! the request and starts a real native recording
+//! (`native::recording::WindowsRecordingEngine`), storing its
+//! in-progress handle in the Tauri-managed `RecordingState` (see
+//! `recording.rs`) rather than in `CaptureService`, which is
 //! deliberately stateless/rebuilt fresh per command (see
 //! docs/architecture.md). `stop_recording_capture` retrieves that
 //! handle, finalizes the video file, and creates the Capture metadata
 //! row — mirroring `commands::capture::create_screenshot_capture`'s
 //! transactional-create discipline, just split across two commands
 //! since a recording can't be captured in one synchronous call.
+//! `get_recording_status` and the `recording-status-changed` event
+//! broadcast (TASK-014) let every window — the main window's Captures
+//! section and the floating widget alike — show "is a recording in
+//! progress, and for how long" regardless of which window started it,
+//! the same cross-window problem `commands::active_process` already
+//! solved for the active Process.
 
 use crate::db::DbService;
 use crate::errors::AppError;
@@ -16,12 +23,12 @@ use crate::media::MediaStorage;
 use crate::models::capture::Capture;
 use crate::native::recording::{RecordingEngine, WindowsRecordingEngine};
 use crate::native::screenshot::WindowsScreenshotEngine;
-use crate::recording::{InProgressRecording, RecordingState};
+use crate::recording::{InProgressRecording, RecordingState, RecordingStatusInfo, RECORDING_STATUS_CHANGED_EVENT};
 use crate::repositories::capture::SqliteCaptureRepository;
 use crate::repositories::process::SqliteProcessRepository;
 use crate::services::capture::CaptureService;
-use serde::{Deserialize, Serialize};
-use tauri::State;
+use serde::Deserialize;
+use tauri::{AppHandle, Emitter, State};
 
 #[derive(Deserialize)]
 pub struct StartRecordingInput {
@@ -29,19 +36,6 @@ pub struct StartRecordingInput {
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
-}
-
-/// What `start_recording_capture` returns — an in-progress marker, not a
-/// full `Capture`: no metadata row exists yet (see `recording.rs`'s
-/// module doc and DECISIONS.md). The frontend doesn't currently do
-/// anything with this beyond knowing the start succeeded, but returning
-/// it (rather than `()`) keeps the command symmetrical with every other
-/// create-style command, which all return the thing they just made.
-#[derive(Serialize)]
-pub struct RecordingStartedInfo {
-    pub id: String,
-    pub process_id: String,
-    pub title: String,
 }
 
 /// Same construction shape as `commands::capture::service` — a fresh
@@ -67,18 +61,21 @@ fn capture_service(db: &State<DbService>, media: &State<MediaStorage>) -> Captur
 /// No Capture metadata row exists yet — that's created by
 /// `stop_recording_capture` once the video is finalized. Fails with
 /// `AppError::Validation` if a recording is already in progress (see
-/// `recording::RecordingState`).
+/// `recording::RecordingState`). Broadcasts `recording-status-changed`
+/// on success so every window reflects the new in-progress recording
+/// immediately.
 #[tauri::command]
 pub fn start_recording_capture(
     input: StartRecordingInput,
     db: State<DbService>,
     media: State<MediaStorage>,
     recording: State<RecordingState>,
-) -> Result<RecordingStartedInfo, AppError> {
+    app: AppHandle,
+) -> Result<RecordingStatusInfo, AppError> {
     let service = capture_service(&db, &media);
     let media_storage = media.inner().clone();
 
-    let (id, process_id, title) = recording.start(move || {
+    let status = recording.start(move || {
         let (title, description) =
             service.validate_recording_start(&input.process_id, &input.title, input.description.as_deref())?;
 
@@ -87,15 +84,17 @@ pub fn start_recording_capture(
         let handle = WindowsRecordingEngine.start(&output_path)?;
 
         Ok(InProgressRecording {
-            id,
-            process_id: input.process_id,
-            title,
+            status: RecordingStatusInfo { id, process_id: input.process_id, title, started_at: now_ms() },
             description: if description.is_empty() { None } else { Some(description) },
             handle,
         })
     })?;
 
-    Ok(RecordingStartedInfo { id, process_id, title })
+    if let Err(err) = app.emit(RECORDING_STATUS_CHANGED_EVENT, Some(&status)) {
+        eprintln!("[golive] failed to broadcast recording start: {err}");
+    }
+
+    Ok(status)
 }
 
 /// Stops the in-progress recording (blocking until the video file is
@@ -106,17 +105,42 @@ pub fn stop_recording_capture(
     db: State<DbService>,
     media: State<MediaStorage>,
     recording: State<RecordingState>,
+    app: AppHandle,
 ) -> Result<Capture, AppError> {
     let in_progress = recording
         .take()
         .ok_or_else(|| AppError::Validation("No recording is in progress.".to_string()))?;
 
+    // `take()` already cleared `RecordingState` — broadcast that now,
+    // before attempting to stop/finalize below, so no window is left
+    // showing a ticking "recording in progress" indicator for a
+    // recording that isn't running anymore even if finalizing fails.
+    if let Err(err) = app.emit(RECORDING_STATUS_CHANGED_EVENT, Option::<RecordingStatusInfo>::None) {
+        eprintln!("[golive] failed to broadcast recording stop: {err}");
+    }
+
     in_progress.handle.stop()?;
 
     capture_service(&db, &media).finalize_recording(
-        &in_progress.id,
-        &in_progress.process_id,
-        &in_progress.title,
+        &in_progress.status.id,
+        &in_progress.status.process_id,
+        &in_progress.status.title,
         in_progress.description.as_deref().unwrap_or(""),
     )
+}
+
+/// Lets a window that wasn't open (or wasn't listening yet) when a
+/// recording started/stopped — e.g. the Captures section, just switched
+/// to a different Process — fetch the current status on mount instead
+/// of waiting for the next `recording-status-changed` event.
+#[tauri::command]
+pub fn get_recording_status(recording: State<RecordingState>) -> Option<RecordingStatusInfo> {
+    recording.status()
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

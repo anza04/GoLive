@@ -1,12 +1,85 @@
-/* Floating capture widget (TASK-011). A tiny, separate window/bundle —
-   reuses design tokens and the shared `.button`/`.button--primary`
-   styles from `App.css` (imported alongside this file in
-   `widget-main.tsx`) rather than reinventing them, but everything
-   layout-specific belongs here. */
+/* Floating capture widget (TASK-011, dot/expand redesign TASK-014). A
+   tiny, separate window/bundle — reuses design tokens and the shared
+   `.button`/`.button--primary` styles from `App.css` (imported alongside
+   this file in `widget-main.tsx`) rather than reinventing them, but
+   everything layout-specific belongs here.
+
+   The Tauri window itself is `"transparent": true` (see
+   `tauri.conf.json`) so the collapsed dot renders as a genuine circle
+   floating on the desktop, not a small square window with a circle
+   drawn inside it — `html`/`body`/`#root` are made transparent here to
+   let that show through; `App.css`'s own `body { background-color:
+   var(--color-bg) }` (opaque, correct for the main window) is
+   overridden for this bundle only, since this stylesheet loads after
+   it (see `widget-main.tsx`'s import order). */
+
+html,
+body,
+#root {
+  background: transparent;
+}
 
 body {
   overflow: hidden;
 }
+
+/* --- Collapsed "dot" state --- */
+
+/* Windows enforces a minimum top-level window width (`SM_CXMIN`, ~130px
+   on most systems) regardless of what `tauri.conf.json`/`set_size`
+   request — a real OS floor, not a bug in this app's own sizing code.
+   Requesting a 56×56 window still yields one ~130px wide (height isn't
+   floored the same way, so it comes through as the real 56px). Rather
+   than fighting that with native `WM_GETMINMAXINFO` interception, the
+   dot is centered in whatever width the window actually ends up with
+   (`position: fixed` + centering transform) — the extra width is
+   transparent and inert (nothing else in this state has a click handler
+   or drag region), so it's invisible and doesn't affect click/drag
+   behavior; only the circle itself is interactive. */
+.widget-dot {
+  appearance: none;
+  border: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--gradient-accent);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.widget-dot:hover {
+  filter: brightness(1.08);
+}
+
+.widget-dot__label {
+  font-size: 1.1rem;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.widget-dot__recording {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: var(--color-danger);
+  border: 2px solid #ffffff;
+  pointer-events: none;
+}
+
+/* --- Expanded panel state --- */
 
 .widget {
   display: flex;
@@ -14,6 +87,9 @@ body {
   height: 100%;
   background-color: var(--color-surface);
   border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
   box-sizing: border-box;
 }
 
@@ -35,6 +111,13 @@ body {
   letter-spacing: -0.01em;
 }
 
+.widget__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.widget__collapse,
 .widget__hide {
   appearance: none;
   border: none;
@@ -47,6 +130,7 @@ body {
   border-radius: var(--radius-sm);
 }
 
+.widget__collapse:hover,
 .widget__hide:hover {
   background-color: rgba(255, 255, 255, 0.2);
 }
@@ -99,8 +183,28 @@ body {
 }
 
 .widget__capture,
-.widget__marker {
+.widget__marker,
+.widget__record {
   width: 100%;
+  justify-content: center;
+}
+
+.widget__recording-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.widget__recording-elapsed {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-danger);
+  white-space: nowrap;
+}
+
+.widget__record-stop {
+  flex: 1;
   justify-content: center;
 }
 

@@ -127,50 +127,111 @@ export interface StartRecordingInput {
   description?: string;
 }
 
-/** What `startRecordingCapture` returns — an in-progress marker, not a
- * full `Capture`: no metadata row exists yet, since the backend only
- * creates one once the recording is stopped (see docs/architecture.md,
- * "Screen recording capture engine and storage", TASK-013). */
-export interface RecordingStartedInfo {
+/**
+ * "Is a recording in progress, and which one" — returned by
+ * `startRecordingCapture`/`getRecordingStatus` and pushed by
+ * `onRecordingStatusChanged` (TASK-014). Not a full `Capture`: no
+ * metadata row exists until the recording is stopped (see
+ * docs/architecture.md, "Screen recording capture engine and storage").
+ * `startedAt` is a raw epoch-ms timestamp — elapsed time is computed
+ * client-side (see `hooks/useElapsedSeconds`), the same
+ * backend-sends-raw-timestamps rule every other date in the app follows.
+ */
+export interface RecordingStatus {
   id: string;
   processId: string;
   title: string;
+  startedAt: number;
 }
 
-interface RawRecordingStartedInfo {
+interface RawRecordingStatus {
   id: string;
   process_id: string;
   title: string;
+  started_at: number;
+}
+
+function statusFromRaw(raw: RawRecordingStatus): RecordingStatus {
+  return { id: raw.id, processId: raw.process_id, title: raw.title, startedAt: raw.started_at };
 }
 
 /**
  * Starts recording the primary display into `input.processId` — the
- * first half of TASK-013's two-phase recording flow. Returns
+ * first half of the two-phase recording flow (TASK-013). Returns
  * immediately; the actual capture continues on the backend until
  * `stopRecordingCapture` is called. Rejects if a recording is already
  * in progress (system-wide — see docs/architecture.md, "one recording
  * at a time").
  */
-export async function startRecordingCapture(input: StartRecordingInput): Promise<RecordingStartedInfo> {
-  const raw = await invoke<RawRecordingStartedInfo>("start_recording_capture", {
+export async function startRecordingCapture(input: StartRecordingInput): Promise<RecordingStatus> {
+  const raw = await invoke<RawRecordingStatus>("start_recording_capture", {
     input: {
       process_id: input.processId,
       title: input.title,
       description: input.description,
     },
   });
-  return { id: raw.id, processId: raw.process_id, title: raw.title };
+  return statusFromRaw(raw);
 }
 
 /**
  * Stops the in-progress recording (blocks until the video file is fully
  * finalized on disk) and returns the resulting Recording Capture, with
- * its metadata row now created — the second half of TASK-013's
- * two-phase flow. Rejects if no recording is currently in progress.
+ * its metadata row now created — the second half of the two-phase flow.
+ * Rejects if no recording is currently in progress.
  */
 export async function stopRecordingCapture(): Promise<Capture> {
   const raw = await invoke<RawCapture>("stop_recording_capture");
   return fromRaw(raw);
+}
+
+/** Reads the current recording status directly — for a window/section
+ * that just mounted and needs to know "is a recording in progress"
+ * without waiting for the next `onRecordingStatusChanged` push (see
+ * `services/activeProcess.ts`'s `getActiveProcess` for the same
+ * pattern). `null` means no recording is in progress. */
+export async function getRecordingStatus(): Promise<RecordingStatus | null> {
+  const raw = await invoke<RawRecordingStatus | null>("get_recording_status");
+  return raw ? statusFromRaw(raw) : null;
+}
+
+const RECORDING_STATUS_CHANGED_EVENT = "recording-status-changed";
+
+/** Subscribes to live recording start/stop updates — pushed to every
+ * window (main window's Captures section, the floating widget) so
+ * either one reflects a recording regardless of which one started it
+ * (TASK-014). Returns the unlisten function — callers must call it on
+ * unmount. */
+export async function onRecordingStatusChanged(
+  callback: (status: RecordingStatus | null) => void,
+): Promise<UnlistenFn> {
+  return listen<RawRecordingStatus | null>(RECORDING_STATUS_CHANGED_EVENT, (event) => {
+    callback(event.payload ? statusFromRaw(event.payload) : null);
+  });
+}
+
+/**
+ * The default title used when starting a recording from a
+ * button/hotkey with no title dialog (the Captures section's toolbar
+ * control and the widget both use this) — same "auto-generated
+ * timestamp title, reusing `formatDate`" convention `createQuickMarker`
+ * (TASK-012) established.
+ */
+export function defaultRecordingTitle(): string {
+  return `Recording — ${formatDate(Date.now())}`;
+}
+
+/**
+ * Fetches a Recording Capture's MP4 bytes and returns a `blob:` object
+ * URL a `<video>` can use directly — the Recording counterpart to
+ * `getCaptureMediaUrl` (TASK-014 playback). Same "backend derives the
+ * file from the id alone, caller owns the URL's lifetime and must
+ * `URL.revokeObjectURL` it" contract.
+ */
+export async function getRecordingMediaUrl(captureId: string): Promise<string> {
+  const bytes = await invoke<ArrayBuffer>("get_recording_media", { id: captureId });
+  const blob = new Blob([bytes], { type: "video/mp4" });
+  return URL.createObjectURL(blob);
 }
 
 export async function listCaptures(processId: string): Promise<Capture[]> {

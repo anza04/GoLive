@@ -8,7 +8,7 @@ M1 — Live Capture (see roadmap.md; M0 — Foundation completed at TASK-009)
 
 Completed:
 TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007,
-TASK-008, TASK-009, TASK-010, TASK-011, TASK-012, TASK-013
+TASK-008, TASK-009, TASK-010, TASK-011, TASK-012, TASK-013, TASK-014
 
 ## Current implementation
 
@@ -431,15 +431,89 @@ TASK-008, TASK-009, TASK-010, TASK-011, TASK-012, TASK-013
     metadata-insert failure — the same discipline `create_screenshot`
     established for PNGs. `delete` now removes a capture's video
     alongside its PNG unconditionally (both are safe no-ops if absent)
-  - `CreateCaptureDialog`: Type = Recording now shows "Start recording"
-    → (fields/Cancel lock, button becomes "Stop recording") → click →
-    the finished Recording Capture appears in the list, same as any
-    other creation flow. Abandoning an in-progress recording via Cancel
-    isn't offered — nothing would ever stop it (see DECISIONS.md); the
-    orphan sweep above is the safety net if the app is closed anyway
-  - No widget/hotkey integration for recording yet — main window's
-    Create Capture dialog only; that and an in-progress indicator are
-    TASK-014's job
+  - `CreateCaptureDialog`'s Type = Recording two-phase flow
+    **(superseded by TASK-014 below — moved to a toolbar-level
+    control)**. Original TASK-013 shape kept here only for history: the
+    dialog collected fields, then "Start recording" locked everything
+    and became "Stop recording."
+- **Recording UI and playback (TASK-014)** — makes screen recording
+  actually usable end to end: a visible Start/Stop control with a live
+  elapsed-time indicator, reachable from two places and correct
+  regardless of which one started it, plus real video playback:
+  - Start/Stop **moved out of `CreateCaptureDialog` entirely** into a
+    toolbar-level `RecordingControl` in `CapturesSection` (sibling of
+    "+ New capture") and a third button in the widget, alongside
+    "Capture screenshot"/"Add marker". `CreateCaptureDialog`'s Type
+    dropdown no longer offers "Recording" — a Recording Capture is only
+    ever created through this dedicated flow now, the same rule
+    Screenshot has followed since TASK-009 (see DECISIONS.md). Both
+    controls use an auto-generated default title
+    (`defaultRecordingTitle()`, `services/captures.ts`) — no dialog
+  - Recording is **system-wide** (one at a time, unchanged from
+    TASK-013), so both controls handle three states: nothing recording
+    (Start enabled), recording *for this Process* (elapsed indicator +
+    Stop), or recording *for a different Process* (Start disabled with
+    an explanatory tooltip)
+  - **Cross-window sync**: `recording::RecordingStatusInfo` (id,
+    process, title, `started_at`) is broadcast via a new
+    `recording-status-changed` event (`AppHandle::emit`) — the exact
+    same `get_*_status`-on-mount + live-event-push shape TASK-011 built
+    for the active Process. `RecordingState` gained a `status()`
+    accessor (read-only snapshot, doesn't consume). `stop_recording_capture`
+    emits the "cleared" event *immediately* after taking the recording
+    out of state — before calling `handle.stop()`/`finalize_recording`,
+    both of which can still fail — so no window is left showing a
+    ticking indicator for a recording that isn't running anymore
+  - `src/hooks/` (new top-level folder, first occupant
+    `useElapsedSeconds`) + `src/utils/formatElapsed.ts`: shared
+    second-by-second elapsed-time ticking/formatting (`M:SS`/`H:MM:SS`),
+    used identically by the Captures section's toolbar and the widget
+  - `CaptureDetail`: Recording captures now render a bounded
+    `<video controls>` element (same non-overflowing media-box
+    treatment as the screenshot `<img>`), fed by a new
+    `getRecordingMediaUrl` (`services/captures.ts`) calling a new
+    `get_recording_media` command (mirrors `get_capture_media` exactly
+    — Capture id in, backend-derived MP4 bytes out as a raw IPC
+    response, wrapped in a `blob:` URL). **Deliberately a single
+    in-memory byte-buffer transfer**, not a streaming/range-request
+    protocol (e.g. Tauri's `asset:` protocol) — evaluated and
+    consciously scoped down rather than assumed necessary; seeking
+    still works over a `blob:` URL since the whole file is already
+    resident in memory once loaded (see DECISIONS.md for the full
+    trade-off, including the memory/large-file caveat)
+  - `CaptureService::get_recording_media` + `MediaStorage::read_video`
+    (new): the Recording counterparts of `get_screenshot_media`/
+    `read_capture`, same `AppError::NotFound`-for-no-media behavior
+- **TASK-014 bugfixes** — found by manual use immediately after TASK-014
+  was first reported done; fixed before starting TASK-015 (see
+  DECISIONS.md, "TASK-014 bugfixes," for the full diagnosis story):
+  - **Video playback didn't work at all.** Root cause:
+    `native::recording::WindowsRecordingEngine` never set an explicit
+    video codec, so `windows-capture` used its own default —
+    `VideoSettingsSubType::HEVC` — which Chromium/WebView2 (what
+    `CaptureDetail`'s `<video>` element runs on) has no built-in decoder
+    for. Fixed by explicitly requesting `VideoSettingsSubType::H264`.
+    TASK-013's native verification only ever confirmed the MP4
+    *container* was well-formed, never which codec was inside it — a
+    narrower check than it read as
+  - **The widget wasn't draggable.** Root cause: `data-tauri-drag-region`
+    (present on the header since TASK-011) needs
+    `core:window:allow-start-dragging`, which was never actually granted
+    — the widget's capability file only ever added
+    `core:event:allow-listen` on top of `core:default`. Fixed by adding
+    the permission
+  - **The widget didn't look like a small dot.** Redesigned with two
+    in-window states: a collapsed circular dot (56×56 requested,
+    `.widget-dot`) that expands to the original panel on click, and a
+    new "–" header button that collapses back (separate from "×", which
+    still fully hides the OS window as before). The window is genuinely
+    resized between states (`commands::widget::set_widget_expanded`),
+    not just visually toggled with CSS. Windows enforces a minimum
+    top-level window width (`SM_CXMIN`, ~130px) regardless of what's
+    requested, so the "56×56" dot actually becomes a ~133×56 window;
+    the dot is centered within whatever width the OS actually grants
+    (`position: fixed` + a centering transform) rather than fighting
+    that floor with native window-message interception
 - Settings placeholder page — empty state, no other settings implemented
 - Reusable application layout components (`AppShell`, `Sidebar`, `Header`
   in `src/components/layout/`) and one reused generic UI component
@@ -1115,19 +1189,118 @@ file at `%APPDATA%\com.golive.app\captures\<id>.mp4` plays correctly in
 a real media player such as Windows' own Movies & TV app) before
 relying on this in a real engagement.
 
+**TASK-014 validation:** `npx tsc --noEmit`, `npm run build`, `cargo
+check` (no warnings), `cargo test` (144/144 passing — 139 pre-existing +
+5 new: `recording::tests::status_reflects_the_current_in_progress_recording`,
+2 `media::tests` for `read_video`, 2 `services::capture::tests` for
+`get_recording_media`), and `npm run tauri build` all pass.
+
+Full UI-flow verification (Projects → Process → Captures → toolbar's
+"Start recording" → confirmed `start_recording_capture` called with the
+exact expected `{ process_id, title }` shape → the toolbar switched to a
+live "● Recording M:SS" indicator, confirmed to actually tick across a
+real multi-second wait, not just render once → "Stop recording" →
+confirmed `stop_recording_capture` was called, the toolbar returned to
+"Start recording," and the finished Recording Capture appeared
+auto-selected with a "Recording" badge → its `CaptureDetail` was
+confirmed to render a real `<video>` element with a `blob:` `src` built
+from the mocked `get_recording_media` response, no loading/error state
+left showing) was verified against the Vite dev server with the same
+mocked-IPC approach every prior task has used, extended with a
+`transformCallback` stub so `listen()` doesn't throw in this harness.
+The widget's three-button layout (all correctly `disabled` with no
+active Process) was confirmed the same way TASK-011/012 verified their
+own buttons; the recording-specific service functions the widget
+depends on (`defaultRecordingTitle`, `startRecordingCapture`,
+`getRecordingStatus`) were additionally verified directly via dynamic
+`import()` against a pre-mocked environment (the same technique
+TASK-012 used for `createQuickMarker`), confirming their exact wire
+shapes. Genuine cross-window event *delivery* (a recording started in
+one window showing up live in another) still can't be exercised in this
+harness — the same standing limitation TASK-011 already documented for
+`active-process-changed`, now also covering `recording-status-changed`;
+not a new gap, and independently proven correct by the Rust-side
+`recording::tests` plus the `commands::recording` emit code itself.
+
+**Native verification:** the freshly rebuilt `golive.exe` was launched
+and, via the same Win32 `EnumWindows` check every prior task has used,
+both windows were confirmed to render correctly with no crash. **This
+paragraph originally claimed "no further native smoke test was needed"
+here, reasoning TASK-013's real-recording verification already retired
+the native risk — that turned out to be wrong** (see the bugfix
+validation below): a well-formed MP4 container and a *playable* one are
+different claims, and only the first had actually been checked. What
+was **not** verified even after the bugfixes below: an actual "start a
+recording from the widget while the main window is hidden, stop it,
+open the main window, watch it play back" pass through the compiled
+app's own window — the roadmap step's own definition of done — for the
+same no-desktop-UI-automation limitation every prior task has recorded.
+Given the first pass already got this wrong once, this is flagged more
+strongly than usual: a developer with an interactive desktop session
+should do that exact pass before relying on this in a real engagement.
+
+**TASK-014 bugfix validation (video playback + widget dot/drag):**
+`npx tsc --noEmit`, `npm run build`, `cargo check` (no warnings),
+`cargo test` (144/144 — unchanged, none of these fixes needed new
+automated tests: the codec choice and window-resize logic both require
+a real native window/capture session, matching this project's existing
+"can't be constructed outside a running app" precedent), and
+`npm run tauri build` all pass.
+
+**Video codec fix — verified with a real recording, not by re-reading
+docs:** a temporary spot-check (`examples/recording_codec_spotcheck.rs`,
+deleted before this fix was complete, same temporary-`pub`-widening
+convention as prior native spot-checks) recorded 3 real seconds of this
+session's desktop and scanned the raw MP4 bytes for the codec's actual
+sample-entry FourCC: `avc1` (H.264) was present, `hvc1`/`hev1` (HEVC)
+were absent — decisive, not inferred.
+
+**Dot centering — verified geometrically, not visually** (no
+native-window screenshot tool exists in this environment, the same
+limitation every prior task has recorded): the Vite dev server's
+`widget.html` was loaded in a browser tab resized to 134×56 — a
+stand-in for the real OS-floored window size, confirmed against the
+actual compiled app via `EnumWindows`/`GetWindowRect`
+(`left=102 top=102 width=133 height=56`, matching the predicted
+`SM_CXMIN` floor) — and the dot's `getBoundingClientRect()` was checked:
+`x≈38.8` against a 56px-wide dot in a 134px-wide viewport,
+`(134-56)/2=39` — centered to within rounding.
+
+**Click-to-expand/collapse — verified interactively:** with a mocked
+`window.__TAURI_INTERNALS__.invoke`, clicking the dot called
+`set_widget_expanded(true)` and the expanded panel rendered; clicking
+its new "–" button called `set_widget_expanded(false)` and the dot
+rendered again; the "×" button still called `hide_widget` afterward,
+confirming it wasn't accidentally repurposed.
+
+**Native verification:** the freshly rebuilt `golive.exe` was launched
+and, via the same Win32 `EnumWindows`/`GetWindowRect` check every prior
+task has used, the widget window was confirmed to actually be ~133×56
+at rest (not the old 260×250 panel size) with no crash. What was
+**not** verified: an actual native click on the dot, an actual
+click-and-drag with the mouse, or genuine HEVC-vs-H.264 playback inside
+the compiled app's own `<video>` element (only the underlying MP4 bytes
+were inspected directly) — still the same no-desktop-UI-automation
+limitation. A developer with an interactive desktop session should
+confirm all three by hand (drag the dot around the screen, click it,
+and watch a real recording play back) before relying on this in a real
+engagement.
+
 ## Not implemented yet
 
 - Note capture media (Note Captures other than quick markers remain
   metadata only — never had media to begin with, unlike Screenshot/
   Recording)
-- Recording UI polish: in-progress indicator, widget/hotkey integration
-  for starting/stopping a recording, video playback in `CaptureDetail`
-  (TASK-013 deliberately shipped a minimal Start/Stop pair in the main
-  window's Create Capture dialog only — see roadmap.md TASK-014)
+- Recording hotkey (TASK-014 added Start/Stop buttons to the Captures
+  section and the widget, but no global keyboard shortcut for
+  recording — only the screenshot hotkey exists, TASK-011)
+- Editing/trimming video, thumbnails (never in scope for M1)
 - Monitor selection, area/window-selection screenshots and recordings
   (TASK-009/TASK-013 only support "capture the primary/current display")
 - Microphone recording
 - Recording pause/resume
+- Cancel/discard an in-progress recording (once started, the only way
+  out is Stop — see DECISIONS.md TASK-013)
 - Hotkey customization UI (the combination is a hardcoded constant,
   `hotkey::shortcut()`)
 - AI integration (OpenAI), structured process generation
@@ -1151,9 +1324,14 @@ relying on this in a real engagement.
 - Recording file size/performance over longer durations than this
   task's short manual verification exercised (a few seconds) — not yet
   measured for a realistic multi-minute consulting session
+- Recording video playback for very long/large files: TASK-014
+  deliberately transfers the whole MP4 as one in-memory byte buffer
+  (same approach as screenshots) rather than a streaming/range-request
+  protocol — untested at realistic multi-minute-recording file sizes;
+  revisit if this becomes a real problem (see DECISIONS.md)
 - AI integration reliability (structured/schema-constrained output)
 - Word document generation quality for a consulting-grade deliverable
 
 ## Next task
 
-TASK-014 (see roadmap.md)
+TASK-015 (see roadmap.md)
