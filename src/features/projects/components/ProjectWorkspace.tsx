@@ -17,15 +17,29 @@ interface ProjectWorkspaceProps {
 type WorkspaceTabId = "overview" | "processes" | "captures" | "documentation";
 
 // The workspace's navigation structure for what a project contains.
-// "overview" and "processes" (TASK-007) have real content; "captures" and
-// "documentation" are reserved, genuinely disabled (not fake-clickable)
-// entries — see docs/architecture.md for how this maps onto real routes
-// later, the same mechanical swap already documented for the top-level
-// Sidebar.
-const WORKSPACE_TABS: { id: WorkspaceTabId; label: string; available: boolean }[] = [
+// "overview" and "processes" (TASK-007) have real content; "documentation"
+// is a reserved, genuinely disabled (not fake-clickable) entry — see
+// docs/architecture.md for how this maps onto real routes later, the
+// same mechanical swap already documented for the top-level Sidebar.
+//
+// "captures" is disabled too, but unlike "documentation" it is NOT a
+// stand-in for a missing feature — Captures have been fully working
+// since TASK-008/009, just one level deeper (inside a selected Process,
+// not here). This tab is reserved for a possible future *project-wide*
+// aggregated captures view, not today's real one, so its `hint`
+// deliberately says something different from the generic "not built
+// yet" every other disabled tab uses — a bugfix (see DECISIONS.md,
+// "hierarchy clarity"): the generic tooltip previously implied the
+// feature didn't exist anywhere in the app at all.
+const WORKSPACE_TABS: { id: WorkspaceTabId; label: string; available: boolean; hint?: string }[] = [
   { id: "overview", label: "Overview", available: true },
   { id: "processes", label: "Processes", available: true },
-  { id: "captures", label: "Captures", available: false },
+  {
+    id: "captures",
+    label: "Captures",
+    available: false,
+    hint: "Open a process under Processes to view and add its captures",
+  },
   { id: "documentation", label: "Documentation", available: false },
 ];
 
@@ -46,7 +60,7 @@ export function ProjectWorkspace({
       </button>
 
       <div className="workspace__header">
-        <div>
+        <div className="entity-header__titles">
           <h2 className="workspace__name">{project.name}</h2>
           {project.description && (
             <p className="workspace__description">{project.description}</p>
@@ -70,7 +84,7 @@ export function ProjectWorkspace({
             className="workspace-tabs__item"
             aria-current={tab.id === activeTab ? "page" : undefined}
             disabled={!tab.available}
-            title={!tab.available ? "Not available yet" : undefined}
+            title={!tab.available ? (tab.hint ?? "Not available yet") : undefined}
             onClick={() => setActiveTab(tab.id)}
           >
             {tab.label}

@@ -91,6 +91,31 @@ pub fn run() {
                 );
             }
 
+            // Bugfix, belt-and-suspenders with `tauri.conf.json`'s widget
+            // window `"backgroundColor": [0, 0, 0, 0]` (see
+            // DECISIONS.md): that config field was reported to still
+            // leave the collapsed dot on an opaque rectangle. Per
+            // Tauri's own `WebviewWindow::set_background_color` doc
+            // (docs.rs, this app's pinned tauri version), a webview
+            // window's background is actually painted in *three*
+            // separate layers on Windows — the native window, the
+            // WebView2 control sitting inside it, and the page's own
+            // CSS — and `tauri.conf.json`'s window-level config field
+            // is not guaranteed to reach the middle (WebView2/webview)
+            // layer for a window declared with the "windows" array's
+            // implicit-default-webview shorthand (no explicit
+            // "webviews" array) the way this app's widget window is.
+            // Setting it again here, explicitly, on the `WebviewWindow`
+            // handle itself, targets that layer directly regardless of
+            // how the declarative config routed it.
+            if let Some(widget_window) = app.get_webview_window("widget") {
+                if let Err(err) = widget_window.set_background_color(Some(tauri::webview::Color(0, 0, 0, 0))) {
+                    eprintln!("[golive] failed to set widget webview background color: {err}");
+                }
+            } else {
+                eprintln!("[golive] widget window not found during setup — cannot set its background color");
+            }
+
             Ok(())
         })
         // Hides a window instead of letting it close — applies to both

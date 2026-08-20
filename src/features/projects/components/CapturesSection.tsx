@@ -1,20 +1,21 @@
 import { useEffect, useState } from "react";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { getErrorMessage } from "../../../utils/errorMessage";
-import { formatElapsed } from "../../../utils/formatElapsed";
-import { useElapsedSeconds } from "../../../hooks/useElapsedSeconds";
 import { CaptureList } from "./CaptureList";
 import { CaptureDetail } from "./CaptureDetail";
 import { CreateCaptureDialog } from "./CreateCaptureDialog";
 import { DeleteCaptureDialog } from "./DeleteCaptureDialog";
+import { NewCaptureMenu } from "./NewCaptureMenu";
 import {
   defaultRecordingTitle,
   getRecordingStatus,
   listCaptures,
+  onCaptureCreated,
   onRecordingStatusChanged,
   startRecordingCapture,
   stopRecordingCapture,
   type Capture,
+  type CaptureType,
   type RecordingStatus,
 } from "../services/captures";
 
@@ -33,6 +34,7 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
   const [listState, setListState] = useState<ListState>({ state: "loading" });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [createType, setCreateType] = useState<CaptureType>("screenshot");
   const [deleteTarget, setDeleteTarget] = useState<Capture | null>(null);
 
   // Recording is system-wide, not scoped to this Process (see
@@ -43,6 +45,10 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus | null>(null);
   const [recordingBusy, setRecordingBusy] = useState(false);
   const [recordingError, setRecordingError] = useState<string | null>(null);
+  // Opt-in microphone toggle (TASK-015) — plain local state, not
+  // persisted, read once when "Start recording" is clicked (see
+  // DECISIONS.md).
+  const [includeAudio, setIncludeAudio] = useState(false);
 
   useEffect(() => {
     void refresh();
@@ -57,13 +63,29 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
       if (!cancelled) setRecordingStatus(status);
     });
 
-    const unlisten = onRecordingStatusChanged((status) => setRecordingStatus(status));
+    const unlistenRecording = onRecordingStatusChanged((status) => setRecordingStatus(status));
+
+    // Bugfix (see DECISIONS.md): a Capture created from the floating
+    // widget — a hotkey screenshot, a quick marker, a recording stopped
+    // there — used to never appear here until the section was
+    // remounted, since nothing told this list to refetch. `handleCreated`
+    // dedupes by id, so this is safe even for a capture this same
+    // window already added locally (dialog submit, this section's own
+    // Stop recording).
+    const unlistenCreated = onCaptureCreated((capture) => {
+      if (capture.processId === processId) handleCreated(capture);
+    });
 
     return () => {
       cancelled = true;
-      void unlisten.then((fn) => fn());
+      void unlistenRecording.then((fn) => fn());
+      void unlistenCreated.then((fn) => fn());
     };
-  }, []);
+    // `processId` is read fresh inside the listener closure below via
+    // this effect's own dependency — re-subscribing on change keeps the
+    // filter correct without a stale closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processId]);
 
   async function refresh() {
     setListState({ state: "loading" });
@@ -77,7 +99,7 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
   }
 
   function handleCreated(capture: Capture) {
-    setCaptures((prev) => [capture, ...prev]);
+    setCaptures((prev) => (prev.some((existing) => existing.id === capture.id) ? prev : [capture, ...prev]));
     setSelectedId(capture.id);
     setCreateOpen(false);
   }
@@ -93,12 +115,22 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
     setDeleteTarget(null);
   }
 
+  function handleCreateScreenshot() {
+    setCreateType("screenshot");
+    setCreateOpen(true);
+  }
+
+  function handleCreateNote() {
+    setCreateType("note");
+    setCreateOpen(true);
+  }
+
   async function handleStartRecording() {
     if (recordingBusy) return;
     setRecordingBusy(true);
     setRecordingError(null);
     try {
-      const status = await startRecordingCapture({ processId, title: defaultRecordingTitle() });
+      const status = await startRecordingCapture({ processId, title: defaultRecordingTitle(), includeAudio });
       setRecordingStatus(status);
     } catch (err) {
       setRecordingError(getErrorMessage(err));
@@ -127,20 +159,18 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
     }
   }
 
-  const newCaptureButton = (
-    <button type="button" className="button button--primary" onClick={() => setCreateOpen(true)}>
-      + New capture
-    </button>
-  );
-
-  const recordingControl = (
-    <RecordingControl
+  const newCaptureMenu = (
+    <NewCaptureMenu
+      onCreateScreenshot={handleCreateScreenshot}
+      onCreateNote={handleCreateNote}
+      recordingStatus={recordingStatus}
       processId={processId}
-      status={recordingStatus}
-      busy={recordingBusy}
-      error={recordingError}
-      onStart={() => void handleStartRecording()}
-      onStop={() => void handleStopRecording()}
+      recordingBusy={recordingBusy}
+      recordingError={recordingError}
+      includeAudio={includeAudio}
+      onIncludeAudioChange={setIncludeAudio}
+      onStartRecording={() => void handleStartRecording()}
+      onStopRecording={() => void handleStopRecording()}
     />
   );
 
@@ -174,10 +204,7 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
     return (
       <div className="captures-section">
         <h4 className="reserved-section__title">Captures</h4>
-        <div className="projects-toolbar">
-          {newCaptureButton}
-          {recordingControl}
-        </div>
+        <div className="projects-toolbar">{newCaptureMenu}</div>
         <EmptyState
           title="No captures yet"
           description="Create a capture to start collecting evidence for this process."
@@ -185,6 +212,7 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
         {createOpen && (
           <CreateCaptureDialog
             processId={processId}
+            initialType={createType}
             onClose={() => setCreateOpen(false)}
             onCreated={handleCreated}
           />
@@ -200,10 +228,7 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
       <h4 className="reserved-section__title">Captures</h4>
       <div className="captures-layout">
         <div className="captures-list-pane">
-          <div className="projects-toolbar">
-            {newCaptureButton}
-            {recordingControl}
-          </div>
+          <div className="projects-toolbar">{newCaptureMenu}</div>
           <CaptureList captures={captures} selectedId={selectedId} onSelect={setSelectedId} />
         </div>
 
@@ -227,6 +252,7 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
       {createOpen && (
         <CreateCaptureDialog
           processId={processId}
+          initialType={createType}
           onClose={() => setCreateOpen(false)}
           onCreated={handleCreated}
         />
@@ -237,62 +263,6 @@ export function CapturesSection({ processId }: CapturesSectionProps) {
           onClose={() => setDeleteTarget(null)}
           onDeleted={handleGone}
         />
-      )}
-    </div>
-  );
-}
-
-interface RecordingControlProps {
-  processId: string;
-  status: RecordingStatus | null;
-  busy: boolean;
-  error: string | null;
-  onStart: () => void;
-  onStop: () => void;
-}
-
-/**
- * The Captures section's Start/Stop recording control (TASK-014) — a
- * toolbar-level control, not nested inside `CreateCaptureDialog`, so a
- * recording can run while the user keeps browsing/selecting other
- * captures instead of being stuck behind a blocking modal for however
- * long the recording lasts (see DECISIONS.md). Recording is system-wide
- * (`status` reflects it regardless of which Process started it — see
- * `recording::RecordingState`), so this also handles "a recording is
- * running, but for a *different* Process" by disabling Start rather
- * than pretending nothing is happening.
- */
-function RecordingControl({ processId, status, busy, error, onStart, onStop }: RecordingControlProps) {
-  const isRecordingHere = status?.processId === processId;
-  const isRecordingElsewhere = status !== null && !isRecordingHere;
-  const elapsedSeconds = useElapsedSeconds(isRecordingHere ? status.startedAt : null);
-
-  return (
-    <div className="recording-control">
-      {isRecordingHere ? (
-        <>
-          <span className="recording-control__indicator" role="status">
-            ● Recording {formatElapsed(elapsedSeconds)}
-          </span>
-          <button type="button" className="button button--danger" onClick={onStop} disabled={busy}>
-            {busy ? "Stopping…" : "Stop recording"}
-          </button>
-        </>
-      ) : (
-        <button
-          type="button"
-          className="button"
-          onClick={onStart}
-          disabled={busy || isRecordingElsewhere}
-          title={isRecordingElsewhere ? "A recording is already in progress for another process." : undefined}
-        >
-          {busy ? "Starting…" : "Start recording"}
-        </button>
-      )}
-      {error && (
-        <span className="recording-control__error" role="alert">
-          {error}
-        </span>
       )}
     </div>
   );

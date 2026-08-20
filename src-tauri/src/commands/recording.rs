@@ -36,6 +36,12 @@ pub struct StartRecordingInput {
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Opt-in microphone audio (TASK-015) — defaults to `false` so any
+    /// caller that predates this field (there are none left in this
+    /// codebase, but the wire format shouldn't require it) still gets
+    /// TASK-013/014's original video-only behavior.
+    #[serde(default)]
+    pub include_audio: bool,
 }
 
 /// Same construction shape as `commands::capture::service` — a fresh
@@ -81,7 +87,7 @@ pub fn start_recording_capture(
 
         let id = uuid::Uuid::new_v4().to_string();
         let output_path = media_storage.video_path(&id)?;
-        let handle = WindowsRecordingEngine.start(&output_path)?;
+        let handle = WindowsRecordingEngine.start(&output_path, input.include_audio)?;
 
         Ok(InProgressRecording {
             status: RecordingStatusInfo { id, process_id: input.process_id, title, started_at: now_ms() },
@@ -121,12 +127,23 @@ pub fn stop_recording_capture(
 
     in_progress.handle.stop()?;
 
-    capture_service(&db, &media).finalize_recording(
+    let capture = capture_service(&db, &media).finalize_recording(
         &in_progress.status.id,
         &in_progress.status.process_id,
         &in_progress.status.title,
         in_progress.description.as_deref().unwrap_or(""),
-    )
+    )?;
+
+    // Same broadcast `create_capture`/`create_screenshot_capture` send
+    // (see `commands::capture::CAPTURE_CREATED_EVENT`) — a recording
+    // stopped from the widget needs the main window's already-open
+    // Captures section to pick it up immediately too, not just clear its
+    // in-progress indicator.
+    if let Err(err) = app.emit(crate::commands::capture::CAPTURE_CREATED_EVENT, &capture) {
+        eprintln!("[golive] failed to broadcast capture creation: {err}");
+    }
+
+    Ok(capture)
 }
 
 /// Lets a window that wasn't open (or wasn't listening yet) when a

@@ -74,7 +74,22 @@ pub fn handle_capture_shortcut(app: &AppHandle) {
     );
 
     let result = match service.create_screenshot(&active.process_id, HOTKEY_CAPTURE_TITLE, None) {
-        Ok(_) => CaptureResult::Ok,
+        Ok(capture) => {
+            // Bugfix (see DECISIONS.md): this path calls `CaptureService`
+            // directly rather than going through the `create_screenshot_capture`
+            // Tauri command (see `commands::capture`, "no requesting
+            // window" doc comment above) — which meant it never ran that
+            // command's `CAPTURE_CREATED_EVENT` emit, so a hotkey
+            // screenshot never appeared in an already-open main-window
+            // Captures section until it was remounted. The widget's own
+            // `SCREENSHOT_CAPTURED_EVENT` (emitted below via
+            // `emit_result`) only ever told the widget "ok/error" — it
+            // carries no Capture payload a list could splice in.
+            if let Err(err) = app.emit(crate::commands::capture::CAPTURE_CREATED_EVENT, &capture) {
+                eprintln!("[golive] failed to broadcast capture creation: {err}");
+            }
+            CaptureResult::Ok
+        }
         Err(err) => CaptureResult::Error { message: err.to_string() },
     };
 

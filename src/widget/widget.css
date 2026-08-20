@@ -189,6 +189,25 @@ body {
   justify-content: center;
 }
 
+.widget__record-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.widget__audio-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.widget__audio-toggle input {
+  cursor: pointer;
+}
+
 .widget__recording-row {
   display: flex;
   align-items: center;

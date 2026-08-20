@@ -50,7 +50,7 @@ record.
 
 ---
 
-## M1 — Live Capture
+## M1 — Live Capture ✅ DONE (TASK-010 through TASK-015)
 
 Everything needed for a consultant to capture a process passively, from
 outside the main window, in every modality the product promises
@@ -223,7 +223,7 @@ TASK-009 proved for PNGs, now proved for video via equivalent automated
 main window is hidden, then stopping it, produces a Capture whose video
 plays back correctly in `CaptureDetail`.
 
-### TASK-015 — Microphone audio capture
+### TASK-015 — Microphone audio capture ✅ DONE
 
 **Depends on:** TASK-013/014 (recording pipeline).
 **Goal:** Let a recording optionally include microphone audio, closing

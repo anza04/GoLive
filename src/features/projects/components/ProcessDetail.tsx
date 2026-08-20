@@ -28,7 +28,7 @@ export function ProcessDetail({ process, onUpdated, onDeleteRequested, onGone }:
   return (
     <div className="process-detail">
       <div className="process-detail__header">
-        <div>
+        <div className="entity-header__titles">
           <h3 className="process-detail__name">{process.name}</h3>
           {process.description && (
             <p className="process-detail__description">{process.description}</p>

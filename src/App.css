@@ -100,8 +100,16 @@ button {
 
 .app-shell__content {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  /* Defensive safety net (see docs/architecture.md §29): if any child's
+     content is ever wider than the window (a long unwrapped label, a
+     fixed-width panel that doesn't shrink), scroll *within* this pane
+     instead of the whole window growing/bleeding past its own right
+     edge — the bug the "+ New capture" toolbar used to trigger before
+     it was consolidated into `NewCaptureMenu`. */
+  overflow-x: auto;
   padding: var(--space-6);
 }
 
@@ -556,6 +564,7 @@ button {
 
 .project-list-item__meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   font-size: 0.75rem;
@@ -599,9 +608,29 @@ button {
 
 .workspace__header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-start;
   gap: var(--space-4);
+  min-width: 0;
+}
+
+/* Shared by every "title block beside an actions row" header
+   (`.workspace__header`, `.process-detail__header`,
+   `.capture-detail__header`) — see docs/architecture.md (real overflow
+   bug, not the same thing as the app-shell-level defensive
+   `overflow-x: auto` safety net above). A flex item defaults to
+   `min-width: auto`, which means it refuses to shrink below its own
+   content's intrinsic width; combined with the `max-width: Nch` on the
+   description below, that content width could exceed the space the
+   header row actually has at the app's own documented minimum window
+   size (760px, see tauri.conf.json), pushing the neighboring Edit/
+   Delete actions block past the window's right edge instead of the
+   title text wrapping. `min-width: 0` is the standard fix: it lets the
+   flex item shrink to whatever the row actually allocates it, so the
+   heading/description wrap within that space instead. */
+.entity-header__titles {
+  min-width: 0;
 }
 
 .workspace__name {
@@ -615,17 +644,20 @@ button {
   margin: 0;
   color: var(--color-text-secondary);
   white-space: pre-wrap;
-  max-width: 60ch;
+  max-width: min(60ch, 100%);
+  overflow-wrap: anywhere;
 }
 
 .workspace__actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: var(--space-2);
-  flex-shrink: 0;
 }
 
 .workspace-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-1);
   border-bottom: 1px solid var(--color-border);
 }
@@ -738,23 +770,37 @@ button {
    layer; reuses .project-list / .project-list-item and
    .reserved-sections from above). */
 
+/* `flex-wrap: wrap` (not the fixed-width/shrink-to-fit layout this used
+   to be — see docs/architecture.md): a list+detail split like this one
+   only has room to sit side by side once the container is wide enough
+   for the list pane's readable minimum *and* the detail pane's own
+   readable minimum at the same time. Below that, shrinking either pane
+   further just squeezes their contents into unreadable slivers (and,
+   compounded by `.captures-layout` nesting inside the detail pane one
+   level down, was the real source of TASK-015's "overflow" bug — see
+   DECISIONS.md). Wrapping lets the detail pane drop to its own full-
+   width row below the list instead, which never overflows because
+   nothing is being forced narrower than it can actually render. */
 .processes-layout {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: var(--space-5);
 }
 
 .processes-list-pane {
-  width: 260px;
-  flex-shrink: 0;
+  flex: 1 1 260px;
+  min-width: 220px;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
 }
 
 .processes-detail-pane {
-  flex: 1;
-  min-width: 0;
+  flex: 3 1 320px;
+  min-width: 280px;
+  max-width: 100%;
   padding: var(--space-5);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -770,9 +816,11 @@ button {
 
 .process-detail__header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-start;
   gap: var(--space-4);
+  min-width: 0;
 }
 
 .process-detail__name {
@@ -786,11 +834,13 @@ button {
   margin: 0;
   color: var(--color-text-secondary);
   white-space: pre-wrap;
-  max-width: 55ch;
+  max-width: min(55ch, 100%);
+  overflow-wrap: anywhere;
 }
 
 .process-detail__meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-4);
   font-size: 0.8rem;
@@ -849,38 +899,126 @@ button {
   border-top: 1px solid var(--color-border);
 }
 
+/* Same "wrap to a stacked layout below its readable minimum" rule as
+   `.processes-layout` above — Captures nests one level deeper (inside
+   the Processes detail pane), so it hits that minimum sooner; wrapping
+   here is what actually stops the compounding-narrowness overflow
+   `.processes-layout`'s own comment describes. */
 .captures-layout {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: var(--space-4);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .captures-list-pane {
-  width: 240px;
-  flex-shrink: 0;
+  flex: 1 1 240px;
+  min-width: 200px;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
 
 .captures-detail-pane {
-  flex: 1;
-  min-width: 0;
+  flex: 2 1 260px;
+  min-width: 220px;
+  max-width: 100%;
   padding: var(--space-4);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background-color: var(--color-surface-alt);
 }
 
-/* Start/Stop recording control (TASK-014) — a toolbar-level sibling of
-   "+ New capture", not nested in a dialog (see DECISIONS.md). */
-.recording-control {
+/* The Captures section's single creation entry point (TASK-014/015
+   bugfix — see DECISIONS.md, "toolbar hierarchy"): one "+ New capture"
+   button opening a popover with Screenshot/Note/Recording, instead of
+   three competing toolbar-level controls (which were also wide enough
+   to overflow a narrower window — see docs/architecture.md §29). */
+.new-capture-menu {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.new-capture-menu__popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 220px;
+  padding: var(--space-2);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.new-capture-menu__item {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  font-size: 0.88rem;
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.new-capture-menu__item:hover:not(:disabled) {
+  background-color: var(--color-surface-alt);
+}
+
+.new-capture-menu__item:disabled {
+  color: var(--color-text-faint);
+  cursor: not-allowed;
+}
+
+.new-capture-menu__divider {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background-color: var(--color-border);
+}
+
+.new-capture-menu__audio-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-1) var(--space-2);
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.new-capture-menu__audio-toggle input {
+  cursor: pointer;
+}
+
+.new-capture-menu__error {
+  padding: 0 var(--space-2);
+  font-size: 0.78rem;
+  color: var(--color-danger);
+}
+
+/* Replaces the trigger button once a recording is actually in progress
+   for the Process this menu belongs to — always glanceable, not hidden
+   behind a click. */
+.recording-indicator {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
+  max-width: 100%;
 }
 
-.recording-control__indicator {
+.recording-indicator__dot {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -890,7 +1028,7 @@ button {
   white-space: nowrap;
 }
 
-.recording-control__error {
+.recording-indicator__error {
   font-size: 0.8rem;
   color: var(--color-danger);
 }
@@ -903,9 +1041,11 @@ button {
 
 .capture-detail__header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-start;
   gap: var(--space-4);
+  min-width: 0;
 }
 
 .capture-detail__title {
@@ -918,7 +1058,8 @@ button {
   margin: 0;
   color: var(--color-text-secondary);
   white-space: pre-wrap;
-  max-width: 55ch;
+  max-width: min(55ch, 100%);
+  overflow-wrap: anywhere;
 }
 
 /* Screenshot preview (TASK-009) — bounded so a full-resolution capture
@@ -953,6 +1094,7 @@ button {
 
 .capture-detail__meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-4);
   font-size: 0.8rem;

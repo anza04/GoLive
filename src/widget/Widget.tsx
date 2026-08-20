@@ -61,6 +61,10 @@ export function Widget() {
   const [marking, setMarking] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus | null>(null);
   const [recordingBusy, setRecordingBusy] = useState(false);
+  // Opt-in microphone toggle (TASK-015) — same "plain local state, not
+  // persisted, read once when Start is clicked" treatment as
+  // `CapturesSection`'s own copy of this control.
+  const [includeAudio, setIncludeAudio] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const busy = capturing || marking;
 
@@ -127,7 +131,11 @@ export function Widget() {
     setRecordingBusy(true);
     setFeedback(null);
     try {
-      const status = await startRecordingCapture({ processId: active.processId, title: defaultRecordingTitle() });
+      const status = await startRecordingCapture({
+        processId: active.processId,
+        title: defaultRecordingTitle(),
+        includeAudio,
+      });
       setRecordingStatus(status);
     } catch (err) {
       setFeedback({ kind: "error", message: getErrorMessage(err) });
@@ -246,15 +254,26 @@ export function Widget() {
               </button>
             </div>
           ) : (
-            <button
-              type="button"
-              className="button widget__record"
-              onClick={() => void handleStartRecording()}
-              disabled={!active || recordingBusy || isRecordingElsewhere}
-              title={isRecordingElsewhere ? "A recording is already in progress for another process." : undefined}
-            >
-              {recordingBusy ? "Starting…" : "Start recording"}
-            </button>
+            <div className="widget__record-group">
+              <label className="widget__audio-toggle">
+                <input
+                  type="checkbox"
+                  checked={includeAudio}
+                  onChange={(event) => setIncludeAudio(event.target.checked)}
+                  disabled={recordingBusy || isRecordingElsewhere}
+                />
+                Include microphone audio
+              </label>
+              <button
+                type="button"
+                className="button widget__record"
+                onClick={() => void handleStartRecording()}
+                disabled={!active || recordingBusy || isRecordingElsewhere}
+                title={isRecordingElsewhere ? "A recording is already in progress for another process." : undefined}
+              >
+                {recordingBusy ? "Starting…" : "Start recording"}
+              </button>
+            </div>
           )}
         </div>
 

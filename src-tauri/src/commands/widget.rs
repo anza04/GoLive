@@ -15,9 +15,10 @@ use tauri::{AppHandle, LogicalSize, Manager};
 const DOT_SIZE: (f64, f64) = (56.0, 56.0);
 
 /// The widget's size once expanded (its original TASK-011/012/013
-/// panel size) — wide/tall enough for the header, active-Process
-/// summary, and three action buttons.
-const EXPANDED_SIZE: (f64, f64) = (260.0, 250.0);
+/// panel size, grown slightly for TASK-015's microphone-audio checkbox)
+/// — wide/tall enough for the header, active-Process summary, and
+/// three action buttons.
+const EXPANDED_SIZE: (f64, f64) = (260.0, 275.0);
 
 #[tauri::command]
 pub fn hide_widget(app: AppHandle) {

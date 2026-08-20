@@ -1526,3 +1526,323 @@ assumed): the dot's `getBoundingClientRect()` was checked against a
 134×56 viewport (a browser-based stand-in for the OS-floored window
 size, since no native-window screenshot tool exists in this
 environment) and confirmed centered to within rounding.
+
+## TASK-015 — Microphone audio capture
+
+**Decision:** microphone audio is captured with `cpal` (the standard
+cross-platform Rust audio I/O crate, WASAPI-backed on Windows with no
+extra Cargo feature needed), feeding raw PCM samples into
+`windows-capture`'s own `VideoEncoder::send_audio_buffer` — rather than
+hand-rolling WASAPI bindings directly against the `windows` crate, or
+looking for a way to have `windows-capture` capture the microphone
+itself.
+**Reason:** `windows-capture`'s audio support (`AudioSettingsBuilder`,
+`send_audio_buffer`) turned out to be **encode-only** — it will encode
+and mux whatever PCM bytes you hand it, but it has no code path that
+opens a microphone itself; screen capture (Windows Graphics Capture) and
+microphone capture (WASAPI) are unrelated OS subsystems with no single
+API spanning both. Something else has to actually open the microphone.
+Hand-rolling WASAPI (`IAudioClient`/`IAudioCaptureClient` via the raw
+`windows` crate, already a transitive dependency of `windows-capture`)
+was evaluated and rejected: it's real native protocol work — buffer
+negotiation, event-driven vs. polling capture, device-change handling —
+that `cpal` already solves, is already widely used/maintained, and
+(as of 0.17.3+, confirmed on the exact version added, 0.18.2) has
+`Send + Sync` streams, which this design genuinely needs (see below).
+**Consequence:** one new dependency (`cpal`) instead of writing and
+maintaining raw WASAPI FFI code; `native::recording` now depends on two
+audio-adjacent crates (`windows-capture` for encoding, `cpal` for
+capture) that know nothing about each other — the glue (format
+matching, feeding bytes across the boundary) lives entirely in
+`native::recording` itself.
+
+**Decision:** the microphone's own default input format (`cpal`'s
+`default_input_config()` — whatever sample rate/channel count the OS
+reports) is used as-is, with only a *sample-format* conversion (`f32`/
+`i16` → 16-bit PCM bytes) applied — no resampling, no channel
+up/downmixing.
+**Reason:** `VideoEncoder`'s `AudioSettingsBuilder` is configured
+*before* the first sample arrives (`sample_rate`/`channel_count` passed
+to it directly from the same `default_input_config()` query), so the
+encoder is always told to expect exactly what's actually being
+captured — there is no format *mismatch* to resolve, only a
+byte-representation conversion. Real resampling (changing sample rate)
+or channel mixing (e.g. forcing stereo mics to mono) would need either
+a DSP crate or hand-written interpolation — real complexity with no
+concrete benefit here, since the encoder happily accepts whatever
+rate/channel count the device reports.
+**Consequence:** recordings' audio sample rate/channel count vary by
+microphone (typically 48kHz, mono or stereo depending on the device) —
+this is transparent to the user (playback works identically regardless
+via the `<video>` element) and not a defect; only `f32`-sample and
+`i16`-sample devices are supported (the two overwhelmingly common WASAPI
+shared-mode formats) — an unrecognized format fails the recording
+outright rather than silently producing garbage audio, since TASK-015's
+scope doesn't include normalizing exotic device formats.
+
+**Decision:** the `VideoEncoder` shared between `on_frame_arrived`
+(driven by `windows_capture`'s own capture thread) and the microphone's
+audio callback (driven by `cpal`'s own audio thread) is wrapped in
+`Arc<Mutex<Option<VideoEncoder>>>`, constructed once inside
+`RecordingHandlerImpl::new` and cloned into the audio callback's closure
+— rather than trying to keep video and audio feeding on a single
+thread, or shipping the encoder out to the caller through a channel.
+**Reason:** video frames and microphone samples arrive on two genuinely
+different, OS-driven threads that this code doesn't control the timing
+of — there's no way to serialize them onto one thread without either
+`windows_capture` or `cpal` supporting that (neither does), so some
+form of shared, lockable state is unavoidable. Building the whole
+audio+video setup inside `new()` (rather than constructing the
+microphone stream in `WindowsRecordingEngine::start()` and shipping the
+encoder handle back out through a channel) keeps everything that needs
+to reference the same `Arc` in one place, with no cross-thread
+handshake/ordering to get right beyond the `Mutex` itself. The `Option`
+inside the `Mutex` (not just `Arc<Mutex<VideoEncoder>>`) exists
+specifically so `on_closed` can `.take()` ownership out for the
+consuming `VideoEncoder::finish()` call — a `MutexGuard` only ever
+yields `&mut T`, and `finish(self)` needs an owned value.
+**Consequence:** `on_closed` drops the microphone stream (`cpal`
+guarantees no further callbacks fire once dropped) **before** taking
+and finishing the encoder — ordering that specifically prevents an
+audio callback from racing `finish()`. A lock is acquired on every
+single video frame and every single audio buffer for the recording's
+whole duration; this is deliberately not optimized further (e.g. a
+lock-free ring buffer) since screen/microphone capture rates are low
+enough (tens of calls per second, not thousands) that mutex contention
+was never a realistic concern for this task's scope.
+
+**Decision:** the "include microphone audio" toggle is a checkbox
+shown only *before* a recording starts (hidden once one is in
+progress), read once at the moment "Start recording" is clicked, with
+no persistence across sessions or between the Captures section and the
+widget — each surface keeps its own independent, transient checkbox
+state.
+**Reason:** matches the roadmap step's own framing ("an opt-in audio
+toggle on the Start Recording action") — a one-shot decision made at
+start time, not a setting. Persisting it (e.g. in `localStorage` or a
+backend preference) was considered and rejected as unnecessary scope:
+nothing in the product description or this task's definition of done
+asks for a remembered preference, and inventing a persistence mechanism
+for one checkbox would be exactly the kind of unscoped addition this
+project's task discipline exists to avoid. Hiding it once recording
+starts avoids a confusing UI state where a checkbox is visible but
+toggling it has no effect (the format is already locked in via
+`AudioSettingsBuilder` before the first frame).
+**Consequence:** a user who wants audio on every recording has to check
+the box every time; if real usage shows this is frequent friction, a
+remembered preference is a small, well-scoped follow-up rather than
+something this task needed to anticipate.
+
+**Decision:** the two new `#[ignore]`d native smoke tests
+(`record_primary_display_with_audio_smoke_test`, mirroring the existing
+video-only one) and this task's manual spot-checks verify **both**
+`avc1` (H.264 video) and `mp4a` (AAC audio) sample-entry FourCCs are
+present in a real recording made with audio enabled — not just that the
+output file is non-empty.
+**Reason:** TASK-013/014's own bugfix history (see above) is the direct
+justification: "the container is well-formed" and "a non-empty file
+exists" were already proven to be *weaker* claims than they first
+appeared — a file can be non-empty and well-formed while still being
+silently wrong (wrong codec, in that case). Applying the same lesson
+here, "the file has audio" needed the same treatment: checking for the
+actual codec sample-entry marker `windows-capture`'s AAC audio track
+would produce, rather than trusting file size alone.
+**Consequence:** a real 5-second recording made with `include_audio:
+true` was confirmed (via a temporary, deleted-before-completion
+spot-check) to contain both `avc1` and `mp4a` markers and no `hvc1` —
+concrete evidence the audio and video tracks were both genuinely muxed
+into one file, not just that *some* bytes were written.
+
+## Post-TASK-015 UI fixes — toolbar hierarchy, live sync, widget dot
+
+Reported by the user immediately after TASK-015, before starting M2:
+five real UI problems, some genuine bugs and one deliberate redesign.
+Recorded here rather than silently folded into earlier tasks' own
+entries, matching this project's established practice for post-hoc
+fixes (see the TASK-014 bugfixes entry above).
+
+**Decision:** "+ New capture", the "Include microphone audio" checkbox,
+and "Start recording" — three separate, always-visible controls sitting
+side by side in the Captures section's toolbar since TASK-013/014/015 —
+were consolidated into one `NewCaptureMenu` component: a single
+"+ New capture" button that opens a small popover offering Screenshot,
+Note, and Recording (with the audio checkbox and Start action living
+*inside* the Recording option, not beside it).
+**Reason:** two real problems, not just taste. (1) Hierarchy: three
+competing, always-visible controls read as three unrelated top-level
+actions instead of one obvious "create a capture" entry point with
+sub-choices — exactly backwards from how the feature is actually used
+(you're always starting from "I want to create something," then
+picking what kind). (2) A genuine overflow bug: the toolbar's fixed-
+width elements (particularly the audio-toggle label, `white-space:
+nowrap`) didn't fit within `.captures-list-pane`'s 240px column at
+narrower-than-default window sizes, and nothing in the ancestor chain
+(`.app-shell__content` had no `overflow-x` rule at all) clipped or
+scrolled the excess — it visibly bled past the window's own right edge
+instead of wrapping or scrolling internally. Fewer, better-behaved
+toolbar elements were the real fix; a defensive `overflow-x: auto` was
+also added to `.app-shell__content` as a safety net for whatever
+similar case turns up next (see docs/architecture.md §29).
+**Consequence:** `RecordingControl` (`CapturesSection.tsx`) was deleted
+and replaced by `NewCaptureMenu` (its own file,
+`features/projects/components/NewCaptureMenu.tsx`); `CreateCaptureDialog`
+gained an `initialType` prop so the popover's "Note" item can open it
+pre-set without an extra manual step. Once a recording is actually in
+progress, the popover trigger is replaced by the elapsed/Stop
+indicator directly (unchanged in spirit from before) — that state still
+needs to stay glanceable, not hidden behind a click.
+
+**Decision:** a new `capture-created` event (`AppHandle::emit`) is
+broadcast to every window by every capture-creating command
+(`create_capture`, `create_screenshot_capture`,
+`stop_recording_capture`), and `CapturesSection` subscribes to it,
+merging any capture for its current Process into its list (deduped by
+id, so a capture this same window already added via its own action's
+return value isn't double-inserted).
+**Reason:** a genuine, previously-unnoticed gap, not a stylistic
+choice: nothing told an already-open Captures section that a Capture
+had been created *elsewhere* — a hotkey screenshot, a quick marker, or
+a recording stopped from the floating widget — so it silently went
+stale until the section was unmounted and remounted (switching
+Processes and back, or leaving and re-entering the Project). This is
+the same cross-window-sync gap TASK-011's `active-process-changed` and
+TASK-014's `recording-status-changed` already solved for their own
+concerns; a Capture being created was simply never wired up the same
+way, because every capture-creation path that existed before TASK-011
+was reachable only from the main window itself, so the gap didn't
+exist yet to notice.
+**Consequence:** every window now needs to treat "a capture was
+created" as something that can happen for reasons other than its own
+direct action — `handleCreated`'s dedupe-by-id guard is what makes that
+safe, rather than trying to have only *one* code path ever add a
+capture to the list (which isn't achievable once both a direct return
+value and a broadcast event can report the same creation).
+
+**Decision:** the widget's window config gained `"backgroundColor": [0,
+0, 0, 0]` alongside its existing `"transparent": true`.
+**Reason:** a real, specific Tauri/WebView2 gotcha, not something
+`"transparent": true` alone covers: on Windows, marking the *window*
+transparent doesn't automatically make the *WebView2 control* itself
+render with a transparent background — without an explicit background
+color, WebView2 paints its own opaque (in this case, solid black)
+background, which is exactly the "ugly rectangular back" the dot
+visibly had. Tauri 2 added dedicated background-color APIs
+(`Webview::set_background_color`, and the declarative
+`backgroundColor` window-config field used here) specifically for this
+gap. The declarative config field was chosen over calling
+`set_background_color` from `.setup()` in `lib.rs` — no extra Rust code
+needed, and it's set at the earliest possible point (window creation)
+rather than after-the-fact.
+**Consequence:** the circular dot should now render as a genuine circle
+against the desktop, not a circle-inside-a-black-square. Not
+independently visually confirmed in this session (no native-window
+screenshot capability exists in this environment — the same standing
+limitation every prior task has recorded); this fix is based on
+directly locating and applying Tauri's own documented mechanism for
+this exact, named problem, not a guess.
+
+## Second UI bugfix pass — the above three fixes didn't hold up
+
+User re-tested the above and reported only the toolbar-consolidation
+fix (recording/audio controls moved inside the new capture menu) had
+actually worked — overflow, live sync, and the widget dot were all
+still broken, and the hierarchy complaint hadn't really been addressed.
+Full diagnosis of each is in docs/architecture.md §30; this records the
+decisions.
+
+**Decision:** fixed the overflow bug with `min-width: 0` on
+`.workspace__header`/`.process-detail__header`/`.capture-detail__header`
+(plus a new shared `.entity-header__titles` class on their title-block
+child) and, more importantly, `flex-wrap: wrap` on
+`.processes-layout`/`.captures-layout`/`.workspace-tabs`/
+`.workspace__actions`, instead of trusting the previous pass's
+defensive `overflow-x: auto`.
+**Reason:** `overflow-x: auto` only changes how already-overflowing
+content is handled (adds a scrollbar) — it doesn't stop a flex row from
+demanding more width than its container has in the first place, which
+is what was actually happening: a flex item's `min-width` defaults to
+`auto` (its content's intrinsic minimum), not `0`, so the three header
+rows above refused to shrink below their own Edit/Delete-actions-plus-
+title content width, regardless of what any ancestor's `overflow-x`
+said. Measured directly (`getBoundingClientRect()` vs `window.innerWidth`
+at 760×480, the app's real documented minimum window size) — this was
+real, visible overflow, not a hypothetical. `min-width: 0` alone fixed
+most of it but not all: a list+detail split shrunk to a genuinely
+unreadable sliver still overflowed by its own remaining content, so the
+list+detail containers themselves needed `flex-wrap: wrap` to drop the
+detail pane to its own full-width row below the list once there isn't
+room for both — the actual fix, with `min-width: 0` as a supporting
+change. `.processes-list-pane` was also still `flex-shrink: 0` (a truly
+fixed 260px, unlike `.captures-list-pane`'s already-shrinkable
+treatment) — same bug, different pane, fixed the same way.
+**Consequence:** verified zero-overflow at both 760×480 (the real
+minimum) and 640×480 (`.app-shell`'s own stricter CSS `min-width`, used
+as a stress test) across every reachable screen in the app, not just
+the one page the original bug report screenshotted.
+
+**Decision:** the widget's transparency fix from the first pass was
+kept, and a second, independent fix was added: `WebviewWindow::set_background_color(Some(Color(0,0,0,0)))`
+called explicitly at runtime in `lib.rs`'s `.setup()`, on the widget
+window's own handle.
+**Reason:** the first pass's `"backgroundColor": [0, 0, 0, 0]` config
+field was real and correctly targets this exact problem per Tauri's own
+docs — but per `WebviewWindow::set_background_color`'s own doc comment
+(docs.rs, this app's pinned version), a webview window's background on
+Windows is painted in three independent layers (native window, WebView2
+control, page CSS), and the declarative window-level config field is
+not guaranteed to reach the middle layer for a window declared via the
+`"windows"` array's implicit-default-webview shorthand — which is how
+this app's widget window is declared, with no separate `"webviews"`
+array. Calling the runtime API explicitly targets that layer directly,
+regardless of how the declarative config routed it.
+**Consequence:** this time actually confirmed with a real screenshot —
+launched the freshly built `golive.exe`, minimized the main window (via
+a small `ShowWindow`/`SW_MINIMIZE` P/Invoke helper) so the widget
+floated over bare desktop, and captured the screen region with
+`System.Drawing.Graphics.CopyFromScreen`. The image shows the desktop
+wallpaper and an unrelated app panel cleanly through the widget
+window's transparent margin, with no rectangular edge anywhere — the
+first genuine visual proof behind this specific claim, not just a
+correctly-applied documented mechanism.
+
+**Decision:** `hotkey.rs`'s `handle_capture_shortcut` now also emits
+`commands::capture::CAPTURE_CREATED_EVENT` with the created `Capture`
+when `CaptureService::create_screenshot` succeeds.
+**Reason:** the first pass's `capture-created` event and
+`CapturesSection` subscriber were themselves correct — re-verified in
+this pass by actually submitting `CreateCaptureDialog` in a mocked
+dev-server harness and reading the resulting list back, not just
+re-reading the code — but they only covered creation paths that go
+through a `#[tauri::command]` function, and the global hotkey's
+screenshot path was never one of those: it calls `CaptureService`
+directly (written in TASK-011, before this event existed, and a global
+shortcut genuinely has no requesting window to route a command call
+through). So a hotkey-triggered screenshot — saved correctly to the
+database — never told any open Captures section about it, reproducing
+"I don't see it until I leave and come back" for exactly that one
+creation path, while the dialog-driven path looked completely fixed in
+isolation.
+**Consequence:** not independently re-verified end to end (pressing the
+real global hotkey and watching a live main window update) — this
+environment has no way to drive the native window's UI to confirm that
+visually — but the fix reuses the exact `app.emit(CAPTURE_CREATED_EVENT,
+&capture)` call and payload contract the already-proven dialog-driven
+path uses, against a real `Capture` value, and `cargo check`/`cargo
+test` (144 passed) both pass against it.
+
+**Decision:** removed "Captures" from `ProjectOverview`'s
+`FUTURE_SECTIONS` placeholder list, and gave the workspace's disabled
+"Captures" tab a specific tooltip ("Open a process under Processes to
+view and add its captures") instead of the generic "Not available yet".
+**Reason:** the one concrete, falsifiable piece of "the UX has some big
+hierarchy issues" found on review: both of these told the user Captures
+didn't exist in the app at all, when it's been fully working since
+TASK-008/009 — just nested inside a selected Process rather than
+surfaced at either of these two places. Actively misleading, not merely
+incomplete.
+**Consequence:** the rest of the hierarchy complaint — the vaguest of
+the five original reports — is deliberately left open rather than
+guessed at further; a broader nav redesign without more specific
+feedback risks repeating exactly what went wrong with the first pass
+(confidently shipping something unverified). Pending the user's
+reaction to this build.

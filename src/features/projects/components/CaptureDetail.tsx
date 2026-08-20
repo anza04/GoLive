@@ -70,7 +70,7 @@ export function CaptureDetail({ capture, onUpdated, onDeleteRequested, onGone }:
   return (
     <div className="capture-detail">
       <div className="capture-detail__header">
-        <div>
+        <div className="entity-header__titles">
           <h4 className="capture-detail__title">{capture.title}</h4>
           {capture.description && (
             <p className="capture-detail__description">{capture.description}</p>

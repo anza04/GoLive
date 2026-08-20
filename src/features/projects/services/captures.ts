@@ -120,11 +120,14 @@ export async function createQuickMarker(processId: string): Promise<Capture> {
 
 /** Input for `startRecordingCapture` — same shape as `CreateScreenshotInput`
  * (no `captureType` field; a recording operation always ends up
- * `type: "recording"`). */
+ * `type: "recording"`). `includeAudio` (TASK-015) is the opt-in
+ * microphone toggle — defaults to no audio if omitted, matching the
+ * backend's own default. */
 export interface StartRecordingInput {
   processId: string;
   title: string;
   description?: string;
+  includeAudio?: boolean;
 }
 
 /**
@@ -169,6 +172,7 @@ export async function startRecordingCapture(input: StartRecordingInput): Promise
       process_id: input.processId,
       title: input.title,
       description: input.description,
+      include_audio: input.includeAudio ?? false,
     },
   });
   return statusFromRaw(raw);
@@ -306,5 +310,27 @@ export async function onScreenshotCaptured(
 ): Promise<UnlistenFn> {
   return listen<ScreenshotCaptureResult>(SCREENSHOT_CAPTURED_EVENT, (event) => {
     callback(event.payload);
+  });
+}
+
+const CAPTURE_CREATED_EVENT = "capture-created";
+
+/**
+ * Subscribes to live "a Capture was created" pushes — bugfix, not part
+ * of the original design: a Capture created from the floating widget
+ * (a hotkey screenshot, a quick marker, a stopped recording) never used
+ * to appear in an already-open main-window Captures section until it
+ * was remounted, since nothing told it to refetch. Fired by every
+ * capture-creating command (`create_capture`, `create_screenshot_capture`,
+ * `stop_recording_capture`) regardless of which window called it — a
+ * listener in the window that itself made the call will see this in
+ * *addition* to that call's own return value, so callers must dedupe by
+ * `id` (e.g. only append if not already present) rather than assuming
+ * each creation is reported exactly once. Returns the unlisten
+ * function — callers must call it on unmount.
+ */
+export async function onCaptureCreated(callback: (capture: Capture) => void): Promise<UnlistenFn> {
+  return listen<RawCapture>(CAPTURE_CREATED_EVENT, (event) => {
+    callback(fromRaw(event.payload));
   });
 }

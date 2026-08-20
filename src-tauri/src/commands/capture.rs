@@ -12,7 +12,20 @@ use crate::repositories::capture::SqliteCaptureRepository;
 use crate::repositories::process::SqliteProcessRepository;
 use crate::services::capture::CaptureService;
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
+
+/// Emitted (via `AppHandle::emit`, Rust-side — not gated by the frontend
+/// ACL) to every window whenever a Capture is created, however it was
+/// created — the generic metadata path, the real-media screenshot path,
+/// or (see `commands::recording::stop_recording_capture`) a finished
+/// recording. A bugfix, not an original design: without this, a Capture
+/// created from the floating widget (a hotkey screenshot, a quick
+/// marker, a recording stopped from there) never appeared in the main
+/// window's already-open Captures section until it was remounted (see
+/// DECISIONS.md). Payload is the full `Capture` — cheap to send, and
+/// lets a listener splice it directly into its list without a second
+/// round trip.
+pub const CAPTURE_CREATED_EVENT: &str = "capture-created";
 
 #[derive(Deserialize)]
 pub struct CreateCaptureInput {
@@ -73,8 +86,14 @@ pub fn create_capture(
     input: CreateCaptureInput,
     db: State<DbService>,
     media: State<MediaStorage>,
+    app: AppHandle,
 ) -> Result<Capture, AppError> {
-    service(&db, &media).create(&input.process_id, &input.capture_type, &input.title, input.description.as_deref())
+    let capture =
+        service(&db, &media).create(&input.process_id, &input.capture_type, &input.title, input.description.as_deref())?;
+    if let Err(err) = app.emit(CAPTURE_CREATED_EVENT, &capture) {
+        eprintln!("[golive] failed to broadcast capture creation: {err}");
+    }
+    Ok(capture)
 }
 
 /// Captures the primary display, stores the PNG, and creates the Capture
@@ -85,8 +104,13 @@ pub fn create_screenshot_capture(
     input: CreateScreenshotInput,
     db: State<DbService>,
     media: State<MediaStorage>,
+    app: AppHandle,
 ) -> Result<Capture, AppError> {
-    service(&db, &media).create_screenshot(&input.process_id, &input.title, input.description.as_deref())
+    let capture = service(&db, &media).create_screenshot(&input.process_id, &input.title, input.description.as_deref())?;
+    if let Err(err) = app.emit(CAPTURE_CREATED_EVENT, &capture) {
+        eprintln!("[golive] failed to broadcast capture creation: {err}");
+    }
+    Ok(capture)
 }
 
 #[tauri::command]

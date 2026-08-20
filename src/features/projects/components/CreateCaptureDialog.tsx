@@ -7,6 +7,10 @@ interface CreateCaptureDialogProps {
   processId: string;
   onClose: () => void;
   onCreated: (capture: Capture) => void;
+  /** Which type the Type `<select>` starts on — defaults to "screenshot".
+   * Lets a caller with a more specific entry point (e.g. a "Note" menu
+   * item) skip the extra click of changing it manually. */
+  initialType?: CaptureType;
 }
 
 // "recording" is deliberately not an option here (TASK-014): a Recording
@@ -24,10 +28,10 @@ const TYPE_OPTIONS: { value: CaptureType; label: string }[] = [
 
 /** Status defaults to Screenshot — the most common capture, and the type
  * that actually does something when the primary action is pressed. */
-export function CreateCaptureDialog({ processId, onClose, onCreated }: CreateCaptureDialogProps) {
+export function CreateCaptureDialog({ processId, onClose, onCreated, initialType }: CreateCaptureDialogProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [captureType, setCaptureType] = useState<CaptureType>("screenshot");
+  const [captureType, setCaptureType] = useState<CaptureType>(initialType ?? "screenshot");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
