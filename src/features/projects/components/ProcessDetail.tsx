@@ -45,7 +45,7 @@ export function ProcessDetail({ process, onUpdated, onDeleteRequested, onGone }:
 
       <CapturesSection processId={process.id} />
 
-      <ProcessDraftSection processId={process.id} />
+      <ProcessDraftSection processId={process.id} processName={process.name} />
 
       {editOpen && (
         <EditProcessDialog

@@ -7,11 +7,17 @@ import {
   type ProcessDraftStep,
   type ProcessVersion,
 } from "../../../services/ai";
+import { exportProcessVersionToDocx } from "../../../services/export";
 import { getErrorMessage } from "../../../utils/errorMessage";
 import { formatDate } from "../../../utils/formatDate";
 
 interface ProcessDraftSectionProps {
   processId: string;
+  /** Suggests a default export filename (TASK-020) — display only,
+   * never sent back to the backend (the export command only ever takes
+   * a version id; the .docx's own title comes from the Process's own
+   * name, read fresh from the database at export time). */
+  processName: string;
 }
 
 // TASK-017 gave this a "Generate" action and a plain read-only view.
@@ -25,7 +31,7 @@ interface ProcessDraftSectionProps {
 // reordering/adding/removing steps, collaborative editing.
 type ListState = { state: "loading" } | { state: "ready" } | { state: "error"; message: string };
 
-export function ProcessDraftSection({ processId }: ProcessDraftSectionProps) {
+export function ProcessDraftSection({ processId, processName }: ProcessDraftSectionProps) {
   const [versions, setVersions] = useState<ProcessVersion[]>([]);
   const [listState, setListState] = useState<ListState>({ state: "loading" });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -36,6 +42,9 @@ export function ProcessDraftSection({ processId }: ProcessDraftSectionProps) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportedPath, setExportedPath] = useState<string | null>(null);
 
   useEffect(() => {
     void refresh();
@@ -69,6 +78,8 @@ export function ProcessDraftSection({ processId }: ProcessDraftSectionProps) {
     setEditSteps(version.content.steps);
     setDirty(false);
     setSaveError(null);
+    setExportError(null);
+    setExportedPath(null);
   }
 
   function handleVersionChange(id: string) {
@@ -79,11 +90,13 @@ export function ProcessDraftSection({ processId }: ProcessDraftSectionProps) {
   function handleSummaryChange(value: string) {
     setEditSummary(value);
     setDirty(true);
+    setExportedPath(null);
   }
 
   function handleStepChange(index: number, patch: Partial<Pick<ProcessDraftStep, "title" | "description">>) {
     setEditSteps((prev) => prev.map((step, i) => (i === index ? { ...step, ...patch } : step)));
     setDirty(true);
+    setExportedPath(null);
   }
 
   async function handleGenerate() {
@@ -113,6 +126,27 @@ export function ProcessDraftSection({ processId }: ProcessDraftSectionProps) {
       setSaveError(getErrorMessage(error));
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Exports the currently selected version's *persisted* content — not
+  // the live edit buffers — so a dirty, unsaved edit never silently
+  // exports something the user hasn't actually saved yet (the Export
+  // button is disabled while `dirty` is true; see the button below).
+  async function handleExport() {
+    if (!selectedId || exporting) return;
+    setExporting(true);
+    setExportError(null);
+    setExportedPath(null);
+    try {
+      const path = await exportProcessVersionToDocx(selectedId, processName);
+      if (path) setExportedPath(path);
+      // `path` is null when the user cancelled the Save As dialog —
+      // not an error, nothing to show.
+    } catch (error) {
+      setExportError(getErrorMessage(error));
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -255,7 +289,23 @@ export function ProcessDraftSection({ processId }: ProcessDraftSectionProps) {
             <button type="submit" className="button button--primary" disabled={!dirty || saving}>
               {saving ? "Saving…" : "Save"}
             </button>
+            <button
+              type="button"
+              className="button"
+              onClick={() => void handleExport()}
+              disabled={dirty || exporting}
+              title={dirty ? "Save your edits before exporting." : undefined}
+            >
+              {exporting ? "Exporting…" : "Export to Word"}
+            </button>
           </div>
+
+          {exportError && (
+            <p className="dialog__error" role="alert">
+              {exportError}
+            </p>
+          )}
+          {exportedPath && <p className="process-draft__export-success">Exported to {exportedPath}</p>}
         </form>
       )}
     </div>

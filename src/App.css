@@ -1247,6 +1247,12 @@ button {
   color: var(--color-text-faint);
 }
 
+.process-draft__export-success {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-success);
+}
+
 .process-draft-editor {
   display: flex;
   flex-direction: column;

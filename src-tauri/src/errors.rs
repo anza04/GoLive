@@ -81,6 +81,17 @@ pub enum AppError {
     /// string — never the raw response body. See `ai::openai::OpenAiService`.
     #[error("{0}")]
     Ai(String),
+
+    /// Building or writing the Word (.docx) functional specification
+    /// export failed (TASK-020) — e.g. the `.docx` writer itself
+    /// couldn't zip the document, or the chosen Save As location can no
+    /// longer be written to. Distinct from `Storage` (this app's own
+    /// SQLite/media directories, which are never user-chosen) and
+    /// `Validation` (a bad `target_path` shape, caught before any writer
+    /// even runs — see `services::docx_export`). An author-written safe
+    /// string, never the raw `docx-rs`/filesystem error.
+    #[error("{0}")]
+    Export(String),
 }
 
 impl AppError {
@@ -95,6 +106,7 @@ impl AppError {
             Self::Credential(_) => "credential_error",
             Self::Network(_) => "network_error",
             Self::Ai(_) => "ai_error",
+            Self::Export(_) => "export_error",
         }
     }
 }

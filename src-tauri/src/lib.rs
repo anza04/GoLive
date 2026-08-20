@@ -19,6 +19,14 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Word (.docx) export (TASK-020): the native Save As dialog the
+        // frontend uses to let the user pick where to export. Registered
+        // as a top-level plugin (not inside `.setup()`) — the plugin's
+        // own documented pattern, same as `tauri_plugin_global_shortcut`
+        // below is registered inside `.setup()` only because it also
+        // needs a handler closure over app state at registration time,
+        // which this plugin doesn't.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir().map_err(|err| {
                 eprintln!("[golive] failed to resolve app data directory: {err}");
@@ -171,6 +179,7 @@ pub fn run() {
             commands::ai::get_process_version,
             commands::ai::get_latest_process_version,
             commands::ai::update_process_version_content,
+            commands::export::export_process_version_to_docx,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
