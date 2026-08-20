@@ -5,6 +5,7 @@
 //! same pattern as every other `commands::*` module.
 
 use crate::ai::openai::OpenAiService;
+use crate::ai::ProcessDraft;
 use crate::credentials::WindowsCredentialStore;
 use crate::db::DbService;
 use crate::errors::AppError;
@@ -29,6 +30,15 @@ pub struct GenerateProcessDraftInput {
 #[derive(Deserialize)]
 pub struct ListProcessVersionsInput {
     pub process_id: String,
+}
+
+/// TASK-019: the whole edited draft, saved in one call — matches how
+/// the frontend editor holds its own local edit buffer (a plain form,
+/// not field-by-field autosave) and sends it back as one unit on Save.
+#[derive(Deserialize)]
+pub struct UpdateProcessVersionContentInput {
+    pub id: String,
+    pub content: ProcessDraft,
 }
 
 fn service(db: &State<DbService>, media: &State<MediaStorage>) -> ProcessDraftService {
@@ -82,4 +92,17 @@ pub fn get_latest_process_version(
     media: State<MediaStorage>,
 ) -> Result<Option<ProcessVersion>, AppError> {
     service(&db, &media).get_latest_version(&input.process_id)
+}
+
+/// Saves a user's edits to an existing version's content in place
+/// (TASK-019) — never inserts a new version; regeneration
+/// (`generate_process_draft`) is the only command that does that. See
+/// `services::process_draft::ProcessDraftService::update_version_content`.
+#[tauri::command]
+pub fn update_process_version_content(
+    input: UpdateProcessVersionContentInput,
+    db: State<DbService>,
+    media: State<MediaStorage>,
+) -> Result<ProcessVersion, AppError> {
+    service(&db, &media).update_version_content(&input.id, input.content)
 }

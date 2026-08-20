@@ -2135,3 +2135,90 @@ distinct timestamps, distinct real content. This is the strongest
 verification standard used in this project to date: an independent read
 of the actual file the shipped application writes to, not a test
 against anything the application's own code constructed.
+
+## TASK-019 — Process editor UI
+
+**Decision:** saving an edit updates the existing version's content in
+place; only regeneration creates a new version. This is the specific
+open decision roadmap.md flagged for this task ("decide and document
+which, consistent with TASK-018's versioning model").
+**Reason:** §5's rule this whole versioning model exists to enforce is
+about *regeneration* — "AI-generated process regeneration must not
+silently overwrite a previous process version" — not about a user
+consciously editing and saving their own already-generated draft.
+Those are two different kinds of event: one is the AI producing a new
+result that might supersede the old one (worth keeping both, hence
+versioning); the other is a human correcting wording in a result they
+already have (not a new result at all). Treating every edit-save as a
+new version would also directly undermine this same task's other
+requirement — "a way to see/switch between versions" — by flooding
+that list with near-duplicate entries differing by a typo fix,
+defeating its purpose as a way to compare meaningfully different
+generations.
+**Consequence:** `ProcessVersion` — deliberately immutable with no
+`update_at`/`update` method as of TASK-018 — needed that reopened:
+`migrations/0006_process_versions_editable.sql` adds `updated_at`
+(nullable at the schema level since SQLite's `ALTER TABLE ADD COLUMN`
+can't attach a computed default, immediately backfilled from
+`created_at` for existing rows in the same migration script; every
+future write this app's own code performs always supplies it
+explicitly) and `ProcessVersionRepository::update_content` (writes
+`content`+`updated_at` only, same "id/process_id/created_at
+structurally can't change" convention every other domain's `update`
+already follows). `create` (regeneration, TASK-018) and
+`update_content` (editing, this task) remain two distinct methods
+nothing routes between — the two operations can't be confused with
+each other in the repository/service code, only by a hypothetical
+future caller picking the wrong one.
+
+**Decision:** `update_process_version_content` takes the whole edited
+`ai::ProcessDraft` in one call, not a granular per-field/per-step PATCH
+API.
+**Reason:** matches how the frontend editor actually works — one local
+edit buffer for the whole form (summary + every step's title/
+description), saved as one unit on a single explicit "Save" click, not
+autosaved field-by-field. A granular API would add real complexity
+(partial-update semantics, conflict handling between fields saved at
+different times) for a UI that doesn't do partial saves in the first
+place.
+**Consequence:** editing is a coarse, whole-draft operation — fully
+sufficient for "a working, honest text editor over the structured
+content" (roadmap.md's explicit ceiling for this task), and simple to
+extend later if a future task genuinely needs field-level granularity.
+
+**Decision:** switching versions (or clicking "Generate new version")
+while there are unsaved edits discards them silently, with no
+confirmation prompt.
+**Reason:** matches the established precedent every dialog's own Cancel
+button in this app already follows (`CreateCaptureDialog`,
+`EditProcessDialog`, etc. — none of them confirm before discarding
+unsaved form input). Introducing a new, different "are you sure"
+pattern just for this one form would be inconsistent with how the rest
+of the app already handles the exact same kind of risk.
+**Consequence:** a user who edits, then switches versions or
+regenerates before clicking Save, loses that edit with no recovery —
+an accepted, documented trade-off consistent with the rest of the app,
+not an oversight.
+
+**Decision:** verified against the real running app and the real
+on-disk database — the same standard TASK-018 set, not relaxed just
+because this task's own repository/service test coverage was already
+thorough.
+**Reason:** the specific claim this task's design decision rests on
+("editing updates in place, never creates a new row") is exactly the
+kind of thing worth the strongest available check, for the same reason
+TASK-018's was: cheap to write a test that looks like it proves the
+right thing while only testing a fake's behavior.
+**Consequence:** using the real Windows UI Automation technique (see
+TASK-016/017/018 entries above): set a real value into the real Summary
+field via `ValuePattern.SetValue`, clicked the real Save button,
+confirmed the UI showed an "Edited" timestamp. Then, via a temporary
+standalone example (deleted after use) reading the real `golive.db`
+file directly — bypassing every layer of this app's own code — confirmed
+the process still had exactly two rows (not three), the edited row's
+`updated_at` was now genuinely different from its `created_at`, and its
+`content` column held the literal text typed through the real UI.
+Clicked "Generate new version" afterward too and confirmed a genuinely
+fresh AI-generated summary appeared, proving regeneration and editing
+remain correctly independent operations in the real, running app — not
+just in unit tests against fakes.

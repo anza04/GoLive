@@ -1194,12 +1194,16 @@ button {
   border: 1px solid var(--color-border);
 }
 
-/* Process draft ("AI analysis", TASK-017) — nested inside ProcessDetail
-   alongside CapturesSection above; replaces what used to be a disabled
-   `.reserved-section` placeholder tile once this became a real feature
-   (same "remove it from the placeholder treatment once it's real"
-   precedent as Processes/Captures before it — see DECISIONS.md,
-   "hierarchy clarity"). */
+/* Process draft ("Process draft", TASK-017/018/019) — nested inside
+   ProcessDetail alongside CapturesSection above; replaces what used to
+   be a disabled `.reserved-section` placeholder tile once this became a
+   real feature (same "remove it from the placeholder treatment once
+   it's real" precedent as Processes/Captures before it — see
+   DECISIONS.md, "hierarchy clarity"). TASK-019 turned the read-only
+   summary/steps view into a real (if deliberately simple) editor —
+   `.process-draft-editor*` below is that form; a version's read-only
+   metadata (`__generated-at`, `__step-refs`) kept its original class
+   names since neither changed shape. */
 
 .process-draft-section {
   display: flex;
@@ -1217,6 +1221,13 @@ button {
   gap: var(--space-3);
 }
 
+.process-draft-section__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .process-draft-section__hint {
   margin: 0;
   max-width: 60ch;
@@ -1224,7 +1235,19 @@ button {
   color: var(--color-text-secondary);
 }
 
-.process-draft {
+.process-draft__generated-at {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--color-text-faint);
+}
+
+.process-draft__step-refs {
+  margin: 2px 0 0;
+  font-size: 0.75rem;
+  color: var(--color-text-faint);
+}
+
+.process-draft-editor {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -1234,18 +1257,7 @@ button {
   background-color: var(--color-surface-alt);
 }
 
-.process-draft__generated-at {
-  margin: 0;
-  font-size: 0.75rem;
-  color: var(--color-text-faint);
-}
-
-.process-draft__summary {
-  margin: 0;
-  color: var(--color-text);
-}
-
-.process-draft__steps {
+.process-draft-editor__steps {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -1253,26 +1265,8 @@ button {
   padding-left: 1.4em;
 }
 
-.process-draft__step {
+.process-draft-editor__step {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-}
-
-.process-draft__step-title {
-  margin: 0;
-  font-size: 0.92rem;
-  font-weight: 700;
-}
-
-.process-draft__step-description {
-  margin: 0;
-  color: var(--color-text-secondary);
-  white-space: pre-wrap;
-}
-
-.process-draft__step-refs {
-  margin: 2px 0 0;
-  font-size: 0.75rem;
-  color: var(--color-text-faint);
+  gap: var(--space-2);
 }

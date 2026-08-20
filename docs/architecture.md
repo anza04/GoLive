@@ -2973,10 +2973,97 @@ strongest verification standard available: not a test against a fake,
 not even a test against a temp-directory database, but an independent
 read of the actual file the shipped application writes to.
 
+## 34. Process editor UI (TASK-019)
+
+**CURRENT.** The "editable" half of README.md's "structured, editable
+business process" promise: a user can generate, read, edit, save, and
+regenerate a Process's structured content entirely through the UI —
+this task's exact definition of done.
+
+**The core design decision this task had to make** (roadmap.md left it
+explicitly open: "decide and document which, consistent with TASK-018's
+versioning model"): does saving an edit update the existing version, or
+create a new one? **Editing updates the version in place; only
+regeneration creates a new version — the two are deliberately different
+operations on deliberately different things.** §5's rule ("AI-generated
+process regeneration must not silently overwrite a previous process
+version") is specifically about *regeneration* — the AI silently
+discarding a prior result. A user consciously editing their own
+already-generated draft and clicking Save is not that; treating every
+keystroke-save as a new "version" would flood the version history with
+near-duplicates and make "switch between versions" (this task's other
+requirement) useless as a way to compare meaningfully different
+generations. This reopens `ProcessVersion`'s TASK-018 immutability by
+design, deliberately: `migrations/0006_process_versions_editable.sql`
+adds `updated_at` (nullable at the schema level, backfilled from
+`created_at` for pre-existing rows, always supplied explicitly by every
+`INSERT`/`UPDATE` this app's own code performs) and
+`ProcessVersionRepository` gained `update_content` (writes `content` +
+`updated_at` only — `id`/`process_id`/`created_at` structurally can't
+change, same convention every other domain's `update` follows). `create`
+(regeneration) and `update_content` (editing) are two distinct methods
+on the same trait; nothing routes between them, so the two operations
+can never be confused with each other in code, only in a hypothetical
+future caller choosing the wrong one.
+
+**The service.** `ProcessDraftService::update_version_content` trims/
+validates (non-empty summary and step titles, length limits matching
+`CaptureService`'s own title/description limits, at least one step —
+the editor can't remove all of them anyway since add/remove isn't in
+scope) before delegating, then re-fetches and returns the updated
+version — same "validate in the service, thin repository underneath"
+split every domain in this app uses.
+
+**The command.** One new command, `update_process_version_content`,
+taking the *whole* edited `ai::ProcessDraft` in one call — matching how
+the frontend editor holds one local edit buffer (a plain form, not
+per-field autosave) and saves it as one unit, not a granular per-field
+PATCH API nothing here needs.
+
+**The UI.** `ProcessDraftSection` (TASK-017/018) became a real, if
+deliberately simple, editor: the summary and each step's title/
+description are plain `<textarea>`/`<input>` fields (a step's
+`capture_ids` stay read-only — "Based on N captures", unchanged — no UI
+asks the roadmap to let a user rewire which captures a step cites); a
+`<select>` dropdown lists every version (newest first) and switching
+loads that version's content into the edit buffers, discarding any
+unsaved edits in the previous one without a confirmation prompt — the
+same "no guard, just switch" convention every dialog's own Cancel
+button in this app already follows (e.g. `CreateCaptureDialog`). Save
+is disabled until something is actually dirty. The section's heading
+changed from "AI analysis" to "Process draft", since editing/versions
+go well beyond what "analysis" implied.
+
+**Testing.** `cargo check`/`cargo test` (204 passed — 12 new, 3 ignored
+unchanged) and `tsc --noEmit` clean. Repository tests cover
+`update_content` changing content/`updated_at` while leaving
+`id`/`process_id`/`created_at` untouched, a missing-id update returning
+`false`, and — the specific thing this task's design decision hinges
+on — that calling `update_content` twice never creates a second row
+(`list_by_process` still returns exactly one). Service tests cover the
+same invariant one layer up, plus every validation rule.
+
+Beyond the automated tests: verified against the real running app and
+the real on-disk database, the same standard TASK-018 set. Using the
+Windows UI Automation technique (§31): set a real value into the real
+Summary field via `ValuePattern.SetValue`, clicked the real Save
+button, and confirmed the UI showed "· Edited `<timestamp>`" appended
+to the generation timestamp. Then, via a temporary standalone example
+(deleted after use, same convention as before) reading the real
+`golive.db` file directly with its own independent connection: **still
+exactly two rows** for that Process (confirming the edit updated in
+place, not appended), with the edited row's `updated_at` now genuinely
+different from its `created_at`, and its `content` column containing
+the literal edited text typed through the real UI. Clicked "Generate
+new version" for real afterward too and confirmed a genuinely fresh
+AI-generated summary appeared, proving regeneration still works
+correctly in the new editor UI and remains a wholly separate operation
+from editing.
+
 ## Status
 
 Reflects the state after **TASK-015, two rounds of UI bugfixes,
-TASK-016, TASK-017, and TASK-018**.
+TASK-016, TASK-017, TASK-018, and TASK-019**.
 
 **M1 — Live Capture is complete** — every capture modality the product
 description promises (screenshot, recording, audio, quick markers)
@@ -2998,11 +3085,17 @@ file GoLive writes (§31). TASK-017: given a Process with real Captures,
 AI-structured draft — every layer of that pipeline, including a real
 successful generation with schema-conformant output, is confirmed
 working against the live OpenAI API and the real running app (§32).
-TASK-018: every generation now persists as an immutable `ProcessVersion`
-— regenerating never overwrites a previous one (§5's rule), confirmed
-not just by tests but by directly reading the real on-disk database
-after a real app restart (§33). TASK-019 (the editor UI — read, edit,
-switch between, and regenerate a Process's versions) is next. No export
-functionality exists yet (M3, still ahead). See
+TASK-018: every generation persists as a `ProcessVersion`, and
+regenerating always creates a new one, never overwriting a previous
+one (§5's rule), confirmed not just by tests but by directly reading
+the real on-disk database after a real app restart (§33). TASK-019: a
+user can now generate, read, edit, save, and regenerate a Process's
+structured content entirely through the UI — editing updates a
+version's content in place, deliberately distinct from regeneration,
+which still always creates a new one; confirmed against the real
+running app and the real database the same way (§34). **The product's
+core AI Structuring loop (M2) is now functionally complete** — TASK-020
+onward is export (M3), not new AI/editing capability. No export
+functionality exists yet. See
 [PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
 implementation status.

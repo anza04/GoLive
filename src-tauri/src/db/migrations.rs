@@ -30,6 +30,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("../../migrations/0003_processes.sql")),
     (4, include_str!("../../migrations/0004_captures.sql")),
     (5, include_str!("../../migrations/0005_process_versions.sql")),
+    (6, include_str!("../../migrations/0006_process_versions_editable.sql")),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<(), AppError> {

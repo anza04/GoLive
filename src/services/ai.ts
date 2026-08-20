@@ -1,17 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * TASK-017/018: generates a structured process draft from a Process's
- * Captures via OpenAI, persisted as an immutable `ProcessVersion` —
- * regenerating creates a new version, never overwriting a previous one
- * (see docs/architecture.md §5/§32).
+ * TASK-017/018/019: generates a structured process draft from a
+ * Process's Captures via OpenAI, persisted as a `ProcessVersion`.
+ * Regenerating always creates a new version, never overwriting a
+ * previous one (see docs/architecture.md §5/§32); editing and saving
+ * updates an existing version's content in place (§33/§34) — two
+ * genuinely different operations, never confused with each other.
  */
 
 export interface ProcessDraftStep {
   title: string;
   description: string;
   /** Which Capture(s) this step is based on — may be empty (a step the
-   * model synthesized rather than tying to one specific capture). */
+   * model synthesized rather than tying to one specific capture).
+   * Read-only in the editor (TASK-019) — not something a user edits. */
   captureIds: string[];
 }
 
@@ -20,7 +23,8 @@ export interface ProcessDraft {
   steps: ProcessDraftStep[];
 }
 
-/** One persisted, immutable generation result (TASK-018). */
+/** One persisted generation result (TASK-018), editable in place since
+ * TASK-019. */
 export interface ProcessVersion {
   id: string;
   processId: string;
@@ -28,6 +32,9 @@ export interface ProcessVersion {
   /** Unix epoch milliseconds (UTC). Format for display with
    * `utils/formatDate` — never pre-formatted by the backend. */
   createdAt: number;
+  /** Unix epoch milliseconds (UTC). Equal to `createdAt` until a user
+   * edits and saves this version at least once. */
+  updatedAt: number;
 }
 
 interface RawProcessDraftStep {
@@ -46,6 +53,7 @@ interface RawProcessVersion {
   process_id: string;
   content: RawProcessDraft;
   created_at: number;
+  updated_at: number;
 }
 
 function draftFromRaw(raw: RawProcessDraft): ProcessDraft {
@@ -59,12 +67,28 @@ function draftFromRaw(raw: RawProcessDraft): ProcessDraft {
   };
 }
 
+/** The inverse of `draftFromRaw` — used only when sending an edited
+ * draft back to `update_process_version_content` (TASK-019); every
+ * other command only ever sends a `ProcessDraft` it received from the
+ * backend in the first place. */
+function draftToRaw(draft: ProcessDraft): RawProcessDraft {
+  return {
+    summary: draft.summary,
+    steps: draft.steps.map((step) => ({
+      title: step.title,
+      description: step.description,
+      capture_ids: step.captureIds,
+    })),
+  };
+}
+
 function versionFromRaw(raw: RawProcessVersion): ProcessVersion {
   return {
     id: raw.id,
     processId: raw.process_id,
     content: draftFromRaw(raw.content),
     createdAt: raw.created_at,
+    updatedAt: raw.updated_at,
   };
 }
 
@@ -99,4 +123,18 @@ export async function getLatestProcessVersion(processId: string): Promise<Proces
     input: { process_id: processId },
   });
   return raw ? versionFromRaw(raw) : null;
+}
+
+/**
+ * Saves edited content to an existing version *in place* (TASK-019) —
+ * never creates a new version; `generateProcessDraft` is the only
+ * function that does that. Rejects with `AppError`-shaped validation
+ * errors (empty summary, empty step title, over a length limit, etc.)
+ * the same way every other create/update call in this app does.
+ */
+export async function updateProcessVersionContent(id: string, content: ProcessDraft): Promise<ProcessVersion> {
+  const raw = await invoke<RawProcessVersion>("update_process_version_content", {
+    input: { id, content: draftToRaw(content) },
+  });
+  return versionFromRaw(raw);
 }

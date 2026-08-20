@@ -9,7 +9,7 @@
 //! that line, never reaching past `AiService` into anything
 //! OpenAI-specific itself.
 
-use crate::ai::{AiService, CaptureForAi, ProcessDraftRequest};
+use crate::ai::{AiService, CaptureForAi, ProcessDraft, ProcessDraftRequest};
 use crate::credentials::CredentialStore;
 use crate::errors::AppError;
 use crate::media::MediaStorage;
@@ -27,6 +27,15 @@ use uuid::Uuid;
 /// what would likely be a mis-scoped Process anyway. Generous enough
 /// that no real single-session Process should ever hit it.
 const MAX_CAPTURES: usize = 60;
+
+/// Length limits for a user's edited content (TASK-019) — the same
+/// "reject obviously-wrong input, don't constrain legitimate use"
+/// rationale, and the same numbers, `CaptureService`'s title/description
+/// limits already use, since a step's title/description is the same
+/// kind of content.
+const MAX_SUMMARY_LENGTH: usize = 5000;
+const MAX_STEP_TITLE_LENGTH: usize = 200;
+const MAX_STEP_DESCRIPTION_LENGTH: usize = 5000;
 
 pub struct ProcessDraftService {
     ai: Box<dyn AiService>,
@@ -122,12 +131,9 @@ impl ProcessDraftService {
 
         let content = self.ai.generate_process_draft(&api_key, &request)?;
 
-        let version = ProcessVersion {
-            id: Uuid::new_v4().to_string(),
-            process_id: process_id.to_string(),
-            content,
-            created_at: now_ms(),
-        };
+        let now = now_ms();
+        let version =
+            ProcessVersion { id: Uuid::new_v4().to_string(), process_id: process_id.to_string(), content, created_at: now, updated_at: now };
         self.versions.create(&version)?;
 
         Ok(version)
@@ -156,6 +162,58 @@ impl ProcessDraftService {
     pub fn get_latest_version(&self, process_id: &str) -> Result<Option<ProcessVersion>, AppError> {
         self.versions.get_latest_by_process(process_id)
     }
+
+    /// Saves a user's edits to an existing version's content in place
+    /// (TASK-019) — trims/validates, bumps `updated_at`, but never
+    /// touches `id`/`process_id`/`created_at`. Deliberately distinct
+    /// from `generate`: this never inserts a new row, and `generate`
+    /// never calls this — regeneration and editing are two genuinely
+    /// different operations on two genuinely different things (a new
+    /// AI result vs. a human correction to an existing one), see
+    /// DECISIONS.md for the full reasoning.
+    pub fn update_version_content(&self, id: &str, content: ProcessDraft) -> Result<ProcessVersion, AppError> {
+        let content = validate_draft(content)?;
+        let updated_at = now_ms();
+        if !self.versions.update_content(id, &content, updated_at)? {
+            return Err(AppError::NotFound);
+        }
+        self.versions.get(id)?.ok_or(AppError::NotFound)
+    }
+}
+
+fn validate_draft(mut draft: ProcessDraft) -> Result<ProcessDraft, AppError> {
+    let summary = draft.summary.trim();
+    if summary.is_empty() {
+        return Err(AppError::Validation("Summary is required.".to_string()));
+    }
+    if summary.chars().count() > MAX_SUMMARY_LENGTH {
+        return Err(AppError::Validation(format!("Summary must be {MAX_SUMMARY_LENGTH} characters or fewer.")));
+    }
+    draft.summary = summary.to_string();
+
+    if draft.steps.is_empty() {
+        return Err(AppError::Validation("A process draft needs at least one step.".to_string()));
+    }
+    for step in &mut draft.steps {
+        let title = step.title.trim();
+        if title.is_empty() {
+            return Err(AppError::Validation("Every step needs a title.".to_string()));
+        }
+        if title.chars().count() > MAX_STEP_TITLE_LENGTH {
+            return Err(AppError::Validation(format!(
+                "A step's title must be {MAX_STEP_TITLE_LENGTH} characters or fewer."
+            )));
+        }
+        if step.description.chars().count() > MAX_STEP_DESCRIPTION_LENGTH {
+            return Err(AppError::Validation(format!(
+                "A step's description must be {MAX_STEP_DESCRIPTION_LENGTH} characters or fewer."
+            )));
+        }
+        step.title = title.to_string();
+        step.description = step.description.trim().to_string();
+    }
+
+    Ok(draft)
 }
 
 fn now_ms() -> i64 {
@@ -269,6 +327,17 @@ mod tests {
         }
         fn get(&self, id: &str) -> Result<Option<ProcessVersion>, AppError> {
             Ok(self.versions.lock().unwrap().iter().find(|v| v.id == id).cloned())
+        }
+        fn update_content(&self, id: &str, content: &ProcessDraft, updated_at: i64) -> Result<bool, AppError> {
+            let mut versions = self.versions.lock().unwrap();
+            match versions.iter_mut().find(|v| v.id == id) {
+                Some(version) => {
+                    version.content = content.clone();
+                    version.updated_at = updated_at;
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
         }
     }
 
@@ -528,5 +597,151 @@ mod tests {
 
         let latest = service.get_latest_version("proc-1").expect("get_latest_version").expect("should exist");
         assert_eq!(latest.id, second.id);
+    }
+
+    fn edited_draft(summary: &str) -> ProcessDraft {
+        ProcessDraft {
+            summary: summary.to_string(),
+            steps: vec![ProcessDraftStep {
+                title: "Edited step".to_string(),
+                description: "Edited description".to_string(),
+                capture_ids: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn update_version_content_saves_edits_and_returns_the_updated_version() {
+        let (service, _dir, _versions) = build_service(
+            Some("sk-test"),
+            Some(sample_process()),
+            vec![sample_capture("c1", 1)],
+            RecordingAiService::new(),
+        );
+        let created = service.generate("proc-1").expect("generate");
+
+        let updated = service.update_version_content(&created.id, edited_draft("Hand-edited summary")).expect("update");
+
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.content.summary, "Hand-edited summary");
+        assert_eq!(updated.content.steps[0].title, "Edited step");
+    }
+
+    #[test]
+    fn update_version_content_never_creates_a_new_version() {
+        let (service, _dir, versions) = build_service(
+            Some("sk-test"),
+            Some(sample_process()),
+            vec![sample_capture("c1", 1)],
+            RecordingAiService::new(),
+        );
+        let created = service.generate("proc-1").expect("generate");
+
+        service.update_version_content(&created.id, edited_draft("Edit one")).expect("update 1");
+        service.update_version_content(&created.id, edited_draft("Edit two")).expect("update 2");
+
+        let listed = versions.list_by_process("proc-1").expect("list");
+        assert_eq!(listed.len(), 1, "editing must never insert a new row");
+        assert_eq!(listed[0].content.summary, "Edit two");
+    }
+
+    #[test]
+    fn update_version_content_rejects_a_missing_id() {
+        let (service, _dir, _versions) = build_service(
+            Some("sk-test"),
+            Some(sample_process()),
+            vec![sample_capture("c1", 1)],
+            RecordingAiService::new(),
+        );
+        let result = service.update_version_content("does-not-exist", edited_draft("x"));
+        assert!(matches!(result, Err(AppError::NotFound)));
+    }
+
+    #[test]
+    fn update_version_content_rejects_an_empty_summary() {
+        let (service, _dir, _versions) = build_service(
+            Some("sk-test"),
+            Some(sample_process()),
+            vec![sample_capture("c1", 1)],
+            RecordingAiService::new(),
+        );
+        let created = service.generate("proc-1").expect("generate");
+        let result = service.update_version_content(&created.id, edited_draft("   "));
+        assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn update_version_content_rejects_zero_steps() {
+        let (service, _dir, _versions) = build_service(
+            Some("sk-test"),
+            Some(sample_process()),
+            vec![sample_capture("c1", 1)],
+            RecordingAiService::new(),
+        );
+        let created = service.generate("proc-1").expect("generate");
+        let empty = ProcessDraft { summary: "Summary".to_string(), steps: vec![] };
+        let result = service.update_version_content(&created.id, empty);
+        assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn update_version_content_rejects_a_step_with_an_empty_title() {
+        let (service, _dir, _versions) = build_service(
+            Some("sk-test"),
+            Some(sample_process()),
+            vec![sample_capture("c1", 1)],
+            RecordingAiService::new(),
+        );
+        let created = service.generate("proc-1").expect("generate");
+        let draft = ProcessDraft {
+            summary: "Summary".to_string(),
+            steps: vec![ProcessDraftStep { title: "  ".to_string(), description: "d".to_string(), capture_ids: vec![] }],
+        };
+        let result = service.update_version_content(&created.id, draft);
+        assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn update_version_content_trims_summary_and_step_fields() {
+        let (service, _dir, _versions) = build_service(
+            Some("sk-test"),
+            Some(sample_process()),
+            vec![sample_capture("c1", 1)],
+            RecordingAiService::new(),
+        );
+        let created = service.generate("proc-1").expect("generate");
+        let draft = ProcessDraft {
+            summary: "  Padded summary  ".to_string(),
+            steps: vec![ProcessDraftStep {
+                title: "  Padded title  ".to_string(),
+                description: "  Padded description  ".to_string(),
+                capture_ids: vec![],
+            }],
+        };
+        let updated = service.update_version_content(&created.id, draft).expect("update");
+        assert_eq!(updated.content.summary, "Padded summary");
+        assert_eq!(updated.content.steps[0].title, "Padded title");
+        assert_eq!(updated.content.steps[0].description, "Padded description");
+    }
+
+    #[test]
+    fn update_version_content_preserves_capture_ids_untouched() {
+        let (service, _dir, _versions) = build_service(
+            Some("sk-test"),
+            Some(sample_process()),
+            vec![sample_capture("c1", 1)],
+            RecordingAiService::new(),
+        );
+        let created = service.generate("proc-1").expect("generate");
+        let draft = ProcessDraft {
+            summary: "Summary".to_string(),
+            steps: vec![ProcessDraftStep {
+                title: "Title".to_string(),
+                description: "Desc".to_string(),
+                capture_ids: vec!["cap-1".to_string(), "cap-2".to_string()],
+            }],
+        };
+        let updated = service.update_version_content(&created.id, draft).expect("update");
+        assert_eq!(updated.content.steps[0].capture_ids, vec!["cap-1".to_string(), "cap-2".to_string()]);
     }
 }

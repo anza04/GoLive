@@ -170,6 +170,7 @@ pub fn run() {
             commands::ai::list_process_versions,
             commands::ai::get_process_version,
             commands::ai::get_latest_process_version,
+            commands::ai::update_process_version_content,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

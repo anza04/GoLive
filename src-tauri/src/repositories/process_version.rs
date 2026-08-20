@@ -1,12 +1,17 @@
 //! `ProcessVersionRepository`: the persistence boundary for the
-//! ProcessVersion domain (TASK-018). All SQL for process versions lives
-//! here. No business rules — those live in `services::process_draft`
-//! (docs/architecture.md SS5).
+//! ProcessVersion domain (TASK-018, editable since TASK-019). All SQL
+//! for process versions lives here. No business rules — those live in
+//! `services::process_draft` (docs/architecture.md §5).
 //!
-//! Deliberately no `update`/`delete`: a ProcessVersion is immutable and
-//! append-only once created (see `migrations/0005_process_versions.sql`)
-//! — this trait's surface reflects that; there is structurally no way
-//! to call an update/delete that doesn't exist.
+//! No `delete`: a ProcessVersion is never individually removed at this
+//! stage (only cascaded away with its Process — see
+//! `migrations/0005_process_versions.sql`). `update_content` exists
+//! (added by TASK-019) specifically for a user editing and saving their
+//! own draft — it is deliberately *not* how regeneration works: a new
+//! generation always goes through `create`, inserting a brand new row,
+//! never touching an existing one. See DECISIONS.md for the full
+//! reasoning behind drawing that line here rather than treating every
+//! content change the same way.
 
 use crate::ai::ProcessDraft;
 use crate::db::DbPool;
@@ -27,6 +32,12 @@ pub trait ProcessVersionRepository: Send + Sync {
     /// would be real, avoidable waste.
     fn get_latest_by_process(&self, process_id: &str) -> Result<Option<ProcessVersion>, AppError>;
     fn get(&self, id: &str) -> Result<Option<ProcessVersion>, AppError>;
+    /// Writes `content` and `updated_at` only (TASK-019, user edits) —
+    /// `id`/`process_id`/`created_at` are not part of the `SET` clause,
+    /// same "structurally can't be changed through update" convention
+    /// every other domain's `update` follows. Returns whether a row was
+    /// actually updated (`false` if `id` didn't exist).
+    fn update_content(&self, id: &str, content: &ProcessDraft, updated_at: i64) -> Result<bool, AppError>;
 }
 
 pub struct SqliteProcessVersionRepository {
@@ -39,7 +50,7 @@ impl SqliteProcessVersionRepository {
     }
 }
 
-const SELECT_COLUMNS: &str = "id, process_id, content, created_at";
+const SELECT_COLUMNS: &str = "id, process_id, content, created_at, updated_at";
 
 /// Parses the `content` column's JSON text back into an `ai::ProcessDraft`.
 /// A failure here (corrupt/foreign JSON somehow ending up in this
@@ -51,7 +62,13 @@ fn row_to_version(row: &Row) -> rusqlite::Result<ProcessVersion> {
     let content: ProcessDraft = serde_json::from_str(&content_json).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err))
     })?;
-    Ok(ProcessVersion { id: row.get(0)?, process_id: row.get(1)?, content, created_at: row.get(3)? })
+    Ok(ProcessVersion {
+        id: row.get(0)?,
+        process_id: row.get(1)?,
+        content,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
 }
 
 impl ProcessVersionRepository for SqliteProcessVersionRepository {
@@ -62,8 +79,8 @@ impl ProcessVersionRepository for SqliteProcessVersionRepository {
         })?;
         let conn = self.pool.get()?;
         conn.execute(
-            "INSERT INTO process_versions (id, process_id, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![version.id, version.process_id, content_json, version.created_at],
+            "INSERT INTO process_versions (id, process_id, content, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![version.id, version.process_id, content_json, version.created_at, version.updated_at],
         )?;
         Ok(())
     }
@@ -101,6 +118,19 @@ impl ProcessVersionRepository for SqliteProcessVersionRepository {
             Some(row) => Ok(Some(row_to_version(row)?)),
             None => Ok(None),
         }
+    }
+
+    fn update_content(&self, id: &str, content: &ProcessDraft, updated_at: i64) -> Result<bool, AppError> {
+        let content_json = serde_json::to_string(content).map_err(|err| {
+            eprintln!("[golive] failed to serialize edited ProcessVersion content: {err}");
+            AppError::Database
+        })?;
+        let conn = self.pool.get()?;
+        let affected = conn.execute(
+            "UPDATE process_versions SET content = ?1, updated_at = ?2 WHERE id = ?3",
+            params![content_json, updated_at, id],
+        )?;
+        Ok(affected > 0)
     }
 }
 
@@ -158,7 +188,13 @@ mod tests {
     }
 
     fn sample_version(id: &str, process_id: &str, summary: &str, created_at: i64) -> ProcessVersion {
-        ProcessVersion { id: id.to_string(), process_id: process_id.to_string(), content: sample_draft(summary), created_at }
+        ProcessVersion {
+            id: id.to_string(),
+            process_id: process_id.to_string(),
+            content: sample_draft(summary),
+            created_at,
+            updated_at: created_at,
+        }
     }
 
     fn seed_process(processes: &SqliteProcessRepository, projects: &SqliteProjectRepository, process_id: &str) {
@@ -267,5 +303,44 @@ mod tests {
         let repo = SqliteProcessVersionRepository::new(db.pool());
         let fetched = repo.get("v1").expect("get").expect("version should survive reopening");
         assert_eq!(fetched.content.summary, "Persisted");
+    }
+
+    #[test]
+    fn update_content_changes_content_and_updated_at_but_not_created_at_id_or_process_id() {
+        let (_dir, repo, processes, projects) = repos_in_temp_dir();
+        seed_process(&processes, &projects, "p1");
+        repo.create(&sample_version("v1", "p1", "Original", 1000)).unwrap();
+
+        let edited = sample_draft("Edited by hand");
+        let updated = repo.update_content("v1", &edited, 5000).expect("update_content");
+        assert!(updated);
+
+        let fetched = repo.get("v1").expect("get").unwrap();
+        assert_eq!(fetched.content.summary, "Edited by hand");
+        assert_eq!(fetched.updated_at, 5000);
+        assert_eq!(fetched.created_at, 1000, "created_at must never change");
+        assert_eq!(fetched.id, "v1");
+        assert_eq!(fetched.process_id, "p1");
+    }
+
+    #[test]
+    fn update_content_on_a_missing_version_returns_false() {
+        let (_dir, repo, _processes, _projects) = repos_in_temp_dir();
+        let updated = repo.update_content("does-not-exist", &sample_draft("x"), 1000).expect("update_content");
+        assert!(!updated);
+    }
+
+    #[test]
+    fn update_content_never_creates_a_second_row() {
+        let (_dir, repo, processes, projects) = repos_in_temp_dir();
+        seed_process(&processes, &projects, "p1");
+        repo.create(&sample_version("v1", "p1", "Original", 1000)).unwrap();
+
+        repo.update_content("v1", &sample_draft("Edited"), 2000).unwrap();
+        repo.update_content("v1", &sample_draft("Edited again"), 3000).unwrap();
+
+        let listed = repo.list_by_process("p1").expect("list");
+        assert_eq!(listed.len(), 1, "editing must update the existing row, never insert a new one");
+        assert_eq!(listed[0].content.summary, "Edited again");
     }
 }

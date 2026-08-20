@@ -4,16 +4,17 @@ Project:
 GoLive
 
 Current milestone:
-M2 — AI Structuring (see roadmap.md; M1 — Live Capture completed at
-TASK-015. TASK-016, TASK-017, and TASK-018, M2's first three steps, are
-all done and fully verified — including a real successful generation
-against the live OpenAI API and real cross-restart SQLite persistence —
-see below)
+M3 — Export and MVP Completion (see roadmap.md; M1 — Live Capture and
+M2 — AI Structuring are both now complete: TASK-015 through TASK-019
+are all done and fully verified — including a real successful
+generation against the live OpenAI API, real cross-restart SQLite
+persistence, and real in-place editing verified against the actual
+database — see below. TASK-020 is M3's first step, next up)
 
 Completed:
 TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007,
 TASK-008, TASK-009, TASK-010, TASK-011, TASK-012, TASK-013, TASK-014,
-TASK-015, TASK-016, TASK-017, TASK-018
+TASK-015, TASK-016, TASK-017, TASK-018, TASK-019
 
 ## Current implementation
 
@@ -775,11 +776,11 @@ TASK-015, TASK-016, TASK-017, TASK-018
     content: ai::ProcessDraft, created_at }` — 1:N with Process,
     `ON DELETE CASCADE`, persisted via `migrations/0005_process_versions.sql`
     (the first migration since `0004_captures.sql`). `content` is a JSON
-    blob, not normalized — nothing needs field-level queries yet
-    (TASK-019's call). No `updated_at` and no `update` repository
-    method at all — a ProcessVersion is genuinely immutable/append-only;
-    regenerating always `INSERT`s a new row, structurally never
-    overwrites one
+    blob, not normalized — nothing needs field-level queries yet. At
+    this stage (before TASK-019, below, reopened it), no `updated_at`
+    and no `update` repository method at all — a ProcessVersion was
+    genuinely immutable/append-only; regenerating always `INSERT`s a
+    new row, structurally never overwrites one
   - `repositories::process_version::ProcessVersionRepository`:
     `create`, `list_by_process` (`created_at DESC`), `get`,
     `get_latest_by_process` (a dedicated "just the newest one" query,
@@ -795,6 +796,35 @@ TASK-015, TASK-016, TASK-017, TASK-018
     on mount (`get_latest_process_version`) instead of always starting
     blank — makes the persistence actually visible to a user between
     visits, not just present in the database
+- **Process editor UI (TASK-019)** — M2's fourth and final step, **M2 is
+  now complete** (see docs/architecture.md §34, DECISIONS.md for the
+  full reasoning, including the key open decision this task had to
+  make):
+  - **Editing updates a version's content in place; only regeneration
+    creates a new version** — the specific decision roadmap.md left
+    open for this task, made and documented: §5's rule is about
+    regeneration silently discarding history, not about a user
+    consciously correcting their own draft
+  - `migrations/0006_process_versions_editable.sql` adds `updated_at`
+    to `process_versions` (nullable at the schema level, backfilled
+    from `created_at`, always supplied explicitly by every write this
+    app's own code performs)
+  - `ProcessVersionRepository::update_content` — writes `content`+
+    `updated_at` only, same "can't change id/process_id/created_at"
+    convention every other domain's `update` follows. Distinct from
+    `create` (regeneration) — the two are never confused in code
+  - `services::process_draft::ProcessDraftService::update_version_content`
+    — trims/validates (non-empty summary, non-empty step titles, length
+    limits matching `CaptureService`'s), then delegates
+  - One new command, `update_process_version_content` — takes the whole
+    edited draft in one call, matching the editor's one-buffer-per-form
+    (not per-field-autosave) design
+  - `ProcessDraftSection` is now a real editor: summary and each step's
+    title/description are plain editable fields (`capture_ids` stay
+    read-only); a version-switcher dropdown loads a different version's
+    content into the edit buffers, discarding unsaved edits without
+    confirmation (matching every dialog's Cancel button elsewhere in
+    this app). Section heading renamed "AI analysis" → "Process draft"
 
 ## Architecture conventions established (TASK-002)
 
@@ -1724,6 +1754,30 @@ app's own code, including the repository under test — confirmed the
 distinct timestamps, distinct real content, neither overwriting the
 other. No verification gap remains for TASK-018.
 
+**TASK-019 validation:** `cargo check`/`cargo test` (204 passed — 12
+new, 3 ignored unchanged) and `tsc --noEmit` clean. Repository/service
+tests cover `update_content`/`update_version_content` changing
+content/`updated_at` while leaving `id`/`process_id`/`created_at`
+untouched, a missing-id update returning not-found, every validation
+rule, and — the thing this task's whole design decision hinges on —
+that calling update twice never creates a second row.
+
+Beyond the automated tests: verified against the real running app and
+the real on-disk database, the same standard TASK-018 set. Using the
+Windows UI Automation technique: set a real value into the real Summary
+field via `ValuePattern.SetValue`, clicked the real Save button,
+confirmed the UI showed an "Edited" timestamp. Then, via a temporary
+standalone example (deleted after use) reading the real `golive.db`
+file directly — bypassing every layer of this app's own code —
+confirmed the process still had exactly **two** rows (not three), the
+edited row's `updated_at` was now genuinely different from its
+`created_at`, and its `content` column held the literal text typed
+through the real UI. Clicked "Generate new version" afterward too and
+confirmed a genuinely fresh AI-generated summary appeared, proving
+regeneration and editing remain correctly independent operations in
+the real app, not just in tests against fakes. No verification gap
+remains for TASK-019.
+
 ## Not implemented yet
 
 - Note capture media (Note Captures other than quick markers remain
@@ -1824,16 +1878,21 @@ other. No verification gap remains for TASK-018.
   exists; nothing to fix yet, just an unknown
 - Unbounded version growth: TASK-018 deliberately left
   deleting/pruning old versions out of scope (per roadmap.md — "not
-  required for MVP"). A Process regenerated very many times will
-  accumulate that many rows/JSON blobs indefinitely; not a problem yet,
-  worth revisiting if it ever becomes one
+  required for MVP"). A Process regenerated (or edited-and-saved) very
+  many times will accumulate that many rows/JSON blobs indefinitely;
+  not a problem yet, worth revisiting if it ever becomes one
+- Discard-without-confirmation when switching versions or regenerating
+  with unsaved edits (TASK-019, a deliberate choice matching this app's
+  existing Cancel-button convention, not an oversight — see
+  DECISIONS.md): a user can lose an edit this way with no recovery.
+  Acceptable for MVP; revisit if it becomes a real complaint
 - Word document generation quality for a consulting-grade deliverable
   (M3, still ahead)
 
 ## Next task
 
-TASK-019 (see roadmap.md) — Process editor UI: let a user actually
-read, edit, save, switch between versions of, and trigger regeneration
-for a Process's structured content — the "editable" half of the
-product's "structured, editable business process" promise. Depends on
-TASK-018 (done).
+TASK-020 (see roadmap.md) — Word (.docx) functional specification
+export: the product's final artifact — generate a real `.docx` from a
+Process's structured content, with embedded screenshots referenced by
+the relevant steps, via a native "Save As" dialog. Depends on TASK-019
+(done). The first M3 step — M1 and M2 are both now complete.

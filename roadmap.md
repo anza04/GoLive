@@ -336,7 +336,7 @@ two retrievable versions, neither overwriting the other; full repository/
 service test coverage matching the rigor already established for
 Project/Process/Capture.
 
-### TASK-019 — Process editor UI
+### TASK-019 ✅ DONE — Process editor UI
 
 **Depends on:** TASK-018.
 **Goal:** Let the user actually read and edit the AI-structured process

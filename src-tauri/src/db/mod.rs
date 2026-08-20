@@ -212,6 +212,25 @@ mod tests {
     }
 
     #[test]
+    fn process_versions_updated_at_column_exists_after_migrations() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = DbService::init(dir.path()).expect("db init should succeed");
+        let conn = db.pool().get().expect("pooled connection");
+
+        // Confirms 0006_process_versions_editable.sql's
+        // `ALTER TABLE ... ADD COLUMN` actually ran on a fresh database
+        // going through the full migration list in order.
+        let column_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('process_versions') WHERE name = 'updated_at'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("querying pragma_table_info should succeed");
+        assert_eq!(column_count, 1, "process_versions.updated_at should exist after migrations");
+    }
+
+    #[test]
     fn migrations_reach_the_expected_user_version() {
         let dir = tempfile::tempdir().expect("temp dir");
         let db = DbService::init(dir.path()).expect("db init should succeed");
@@ -220,6 +239,6 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("reading user_version should succeed");
-        assert_eq!(version, 5, "schema should be at the latest migration (0005_process_versions.sql)");
+        assert_eq!(version, 6, "schema should be at the latest migration (0006_process_versions_editable.sql)");
     }
 }
