@@ -2222,3 +2222,138 @@ Clicked "Generate new version" afterward too and confirmed a genuinely
 fresh AI-generated summary appeared, proving regeneration and editing
 remain correctly independent operations in the real, running app — not
 just in unit tests against fakes.
+
+## TASK-020 — Word (.docx) functional specification export
+
+**Decision:** `docx-rs` (crates.io, pure Rust, `image` feature enabled)
+for generating the `.docx` file itself.
+**Reason:** roadmap.md asked for "a minimal, well-maintained Rust `.docx`
+generation approach" with the choice and rejected alternatives
+documented. `docx-rs` is the actively-maintained option in this space
+(the older `docx` crate is effectively unmaintained) and needs no
+external binary or non-Rust runtime dependency (unlike, say, shelling
+out to LibreOffice or a templating approach built on an OOXML template
+file, either of which would add a real deployment/installer burden this
+app has otherwise avoided — see §15's dependency inventory philosophy).
+Its `image` feature reads a PNG's own pixel dimensions directly (needed
+to scale screenshots to fit a page — see below) without a second image
+crate. Its API is a plain builder (`Docx::new().add_paragraph(...)...
+.build().pack(writer)`) that maps directly onto "title, summary
+paragraph, per-step heading/body/optional image" with no templating
+language or intermediate document format to learn.
+**Consequence:** one new dependency, pulling in `zip`/`image` transitively
+(both already reputable, widely-used crates on their own) — verified by
+actually compiling and producing a `.docx` (see below), not just adding
+it to `Cargo.toml`.
+
+**Decision:** the exported document's formatting (title, "Functional
+Specification" subtitle, Summary section, numbered Process Steps
+section, one screenshot per citing step) is built with plain
+bold/sized `Run`s on ordinary paragraphs, not named/pre-defined Word
+styles (`docx-rs`'s `Style`/`"Heading1"`-style API, see its `style.rs`
+example).
+**Reason:** a named style like `"Heading1"` only renders with real
+heading formatting in Word if the document also defines that style
+(`Docx::add_style`) — `docx-rs` doesn't ship Word's built-in style
+definitions for you. Defining a handful of custom styles just to get
+"bold, bigger" is strictly more code and more to get subtly wrong than
+directly setting bold/size on the runs that need it, for a document this
+structurally simple (no table of contents, no cross-references into a
+style that would need to exist for TOC discovery).
+**Consequence:** the .docx's visual hierarchy (title/subtitle/section
+headers/step titles/body text) is expressed purely as font size (in
+half-points, `docx-rs`'s own unit) and bold, not as Word "style" names a
+user could retarget via Word's Styles pane — an accepted limitation
+consistent with "a working, honest" document (roadmap.md's own
+description of the *editor's* ceiling, applied here to the export too),
+not a polished branded template (explicitly out of scope for this task).
+
+**Decision:** a cited screenshot is embedded scaled down (never up) to a
+fixed maximum width (6 inches, leaving a page-margin gutter on a
+standard Letter/A4 layout), preserving aspect ratio; images are never
+left at their native captured resolution.
+**Reason:** `Pic::new` (via its `image` feature) sizes an embedded image
+1:1 to its source pixel dimensions, converted straight to EMUs — for a
+real screen-resolution screenshot (e.g. 1920×1080) that would be roughly
+20 inches wide in the resulting document, many times wider than any
+page, and Word does not auto-fit an inline image to the page for you.
+**Consequence:** `services::docx_export::scaled_pic` reads `Pic::new`'s
+own computed `(width, height)` (both public fields on `Pic`) and, only
+if the width exceeds the cap, recomputes both dimensions by the same
+scale factor and calls `.size(...)` with the result — a narrower image
+(e.g. a small manually-cropped screenshot) is left exactly as `Pic::new`
+sized it, never stretched up to fill the page.
+
+**Decision:** `tauri-plugin-dialog` (the official first-party Tauri
+plugin) drives the native Save As dialog, with the main window's
+capability grant narrowed to exactly `dialog:allow-save` — not the
+plugin's own broader `dialog:default` (which also grants `allow-open`/
+`allow-message`, neither of which anything in this app uses).
+**Reason:** matches every prior capability decision this app has made
+(§ "Tauri least privilege confirmed: capabilities grant only
+`core:default`" in docs/architecture.md, and TASK-011's
+`core:event:allow-listen`-only widget capability) — grant exactly the
+permission a feature needs, not a bundled default that happens to
+include it.
+**Consequence:** if a future task needs an Open or a message-box dialog,
+that capability is added explicitly then, documented for what it's
+actually for, rather than having been silently available since this
+task.
+
+**Decision:** exporting always writes the currently *selected version's
+persisted content* (re-read from the database by `version_id`), and the
+Export button is disabled whenever the editor has unsaved edits
+(`dirty`) — it never exports the in-memory edit buffer directly.
+**Reason:** the export command only ever takes a `version_id`, the same
+shape every other read command in this domain uses (`get_process_version`,
+etc.) — adding a second "export this exact draft even if unsaved" path
+would mean the backend accepting a whole `ProcessDraft` payload for an
+operation that isn't supposed to persist anything, a confusing new
+shape only Export would have. Disabling the button while dirty makes
+what actually gets exported unambiguous: exactly what Save last wrote,
+never a silent mismatch between "what's on screen" and "what's in the
+file.".
+**Consequence:** a user must click Save before Export if they just
+edited — one extra click, but no risk of exporting stale-looking-fresh
+content; `ProcessDraftSection` also clears any prior "Exported to …"
+success message the instant a new edit is made, so a stale success
+message can never be mistaken for confirmation that the *new* edit was
+exported.
+
+**Decision:** `target_path` (the user-chosen Save As destination) is
+still validated in Rust — must end in `.docx`, its parent directory must
+still exist — even though it only ever originates from
+`tauri-plugin-dialog`'s own native dialog, never raw frontend text
+input.
+**Reason:** roadmap.md's own framing for this task: "still no arbitrary
+frontend-supplied path reaches native code unvalidated." The dialog
+being native doesn't change that the path arrives at the Tauri command
+boundary as an ordinary string argument like any other IPC payload;
+trusting it purely because of *how* the frontend obtained it would be
+exactly the kind of implicit trust this app's layering has avoided
+everywhere else (e.g. `media::MediaStorage::path_for`'s UUID validation
+never trusted a capture id just because it came from application code
+either).
+**Consequence:** `DocxExportService::export` rejects a non-`.docx`
+extension and a target whose parent directory has vanished between the
+dialog closing and the export command running (e.g. a removable drive
+unplugged mid-flow) with a clear `AppError::Validation`, before any file
+write is attempted — covered by dedicated tests
+(`export_rejects_a_target_path_without_a_docx_extension`,
+`export_rejects_a_target_whose_parent_directory_does_not_exist`).
+
+**Decision:** verified with a real, opened-in-Word `.docx` file, not
+just the automated test suite's "starts with the ZIP magic bytes" check.
+**Reason:** the automated tests confirm a well-formed ZIP container and
+correct validation/skip behavior against fakes, but roadmap.md's actual
+definition of done is specifically "opens correctly in Microsoft Word
+and contains the expected structure and images" — a claim only a real
+Word install can actually confirm (a malformed OOXML part can still be a
+technically-valid ZIP).
+**Consequence:** see docs/architecture.md §35 for the full verification
+narrative — exported a real Process's real generated-and-edited content
+(including at least one step citing a real screenshot Capture) through
+the actual running app's native Save As dialog, then opened the
+resulting file in Microsoft Word directly and visually confirmed the
+title, summary, numbered steps, and embedded image all render as
+expected.

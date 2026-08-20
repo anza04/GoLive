@@ -365,7 +365,7 @@ regenerate a Process's structured content entirely through the UI.
 
 ## M3 — Export and MVP Completion
 
-### TASK-020 — Word (.docx) functional specification export
+### TASK-020 ✅ DONE — Word (.docx) functional specification export
 
 **Depends on:** TASK-019 (edited, finalized structured content).
 **Goal:** Deliver the product's final artifact — a Word document a

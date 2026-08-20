@@ -5,16 +5,18 @@ GoLive
 
 Current milestone:
 M3 — Export and MVP Completion (see roadmap.md; M1 — Live Capture and
-M2 — AI Structuring are both now complete: TASK-015 through TASK-019
-are all done and fully verified — including a real successful
-generation against the live OpenAI API, real cross-restart SQLite
-persistence, and real in-place editing verified against the actual
-database — see below. TASK-020 is M3's first step, next up)
+M2 — AI Structuring are both complete: TASK-010 through TASK-019 are
+all done and fully verified — including a real successful generation
+against the live OpenAI API, real cross-restart SQLite persistence, and
+real in-place editing verified against the actual database. TASK-020,
+M3's first step, is now also done — a real Process export opens
+correctly in Microsoft Word, verified directly — see below. TASK-021,
+the roadmap's final step, is next)
 
 Completed:
 TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007,
 TASK-008, TASK-009, TASK-010, TASK-011, TASK-012, TASK-013, TASK-014,
-TASK-015, TASK-016, TASK-017, TASK-018, TASK-019
+TASK-015, TASK-016, TASK-017, TASK-018, TASK-019, TASK-020
 
 ## Current implementation
 
@@ -825,6 +827,54 @@ TASK-015, TASK-016, TASK-017, TASK-018, TASK-019
     content into the edit buffers, discarding unsaved edits without
     confirmation (matching every dialog's Cancel button elsewhere in
     this app). Section heading renamed "AI analysis" → "Process draft"
+- **Word (.docx) functional specification export (TASK-020)** — M3's
+  first step, the product's final artifact (see docs/architecture.md
+  §35, DECISIONS.md for the full reasoning):
+  - New dependency `docx-rs` (pure Rust, `image` feature) — the .docx
+    writer itself; chosen over the unmaintained `docx` crate and over
+    shelling out to an external Word/LibreOffice binary (no runtime
+    dependency beyond what's already a normal Rust crate)
+  - New dependency `tauri-plugin-dialog` (official first-party plugin) —
+    drives the native Save As dialog; the main window's capability grant
+    is narrowed to exactly `dialog:allow-save`, not the plugin's broader
+    `dialog:default`
+  - `services::docx_export::DocxExportService::export(version_id,
+    target_path)` — loads the `ProcessVersion` and its parent `Process`,
+    validates `target_path` (must end `.docx`; its parent directory must
+    still exist), then builds the document (title = the Process's own
+    name, "Functional Specification" subtitle, description, Summary,
+    numbered Process Steps each with its title/description and any
+    screenshot(s) its `capture_ids` cite) and writes it via
+    `std::fs::File::create` + `Docx::pack`. A cited screenshot is scaled
+    down — never up — to a 6-inch-wide cap (`scaled_pic`) so a real
+    screen-resolution capture never overflows the page; a non-screenshot
+    or since-deleted cited capture is silently skipped, same tolerance
+    `ProcessDraftService::generate` already applies to missing media
+  - One new command, `export_process_version_to_docx`, taking
+    `{ version_id, target_path }`
+  - One new `AppError` variant, `Export(String)` — building/writing the
+    document itself failing, distinct from `Validation` (a bad
+    `target_path`, caught before any writer runs) and `Storage` (this
+    app's own SQLite/media directories, never user-chosen)
+  - `services/export.ts` (new): opens a native Save As dialog
+    (`@tauri-apps/plugin-dialog`'s `save()`, defaulting to
+    `<ProcessName>.docx`, sanitized of characters Windows filenames
+    can't contain) and, unless the user cancels (`null`, not an error),
+    invokes the export command with the chosen path
+  - `ProcessDraftSection` gained an "Export to Word" button next to
+    Save. It always exports the currently *selected version's persisted
+    content* (re-read from the database by `version_id`), never the
+    live edit buffer — the button is disabled whenever there are
+    unsaved edits (`dirty`), with an explanatory tooltip, so what
+    actually lands in the file is never ambiguous. A successful export
+    shows the chosen path inline, cleared the instant a new edit is made
+    so a stale success message can't be mistaken for confirming the
+    newest edit was exported
+  - Still no arbitrary frontend-supplied path reaches native code
+    unvalidated (roadmap.md's own framing for this task): even though
+    `target_path` only ever originates from the native Save As dialog,
+    `DocxExportService::export` still validates it itself rather than
+    trusting it just because of where it came from
 
 ## Architecture conventions established (TASK-002)
 
@@ -1805,13 +1855,18 @@ remains for TASK-019.
   does — see docs/architecture.md §28)
 - Hotkey customization UI (the combination is a hardcoded constant,
   `hotkey::shortcut()`)
-- AI integration (OpenAI), structured process generation
-- Transcription
-- Process editor, process versioning
-- Word export
+- Transcription (never part of any task in roadmap.md's scope — the AI
+  pipeline works from capture titles/descriptions/screenshot images
+  only, never audio/video content itself)
 - ZIP import/export
 - Search (FTS5)
-- Windows Credential Manager integration
+
+(AI integration, the process editor/versioning, Windows Credential
+Manager integration, and Word export were all listed here previously —
+TASK-016 through TASK-020 have since implemented all of them; see
+"Current implementation" above. This note is left here rather than
+silently deleted so the list's own history stays visible — the next
+task to touch this file should remove it.)
 
 ## Known technical risks
 
@@ -1886,13 +1941,22 @@ remains for TASK-019.
   existing Cancel-button convention, not an oversight — see
   DECISIONS.md): a user can lose an edit this way with no recovery.
   Acceptable for MVP; revisit if it becomes a real complaint
-- Word document generation quality for a consulting-grade deliverable
-  (M3, still ahead)
+- Word export visual polish (TASK-020 deliberately produces a working,
+  honest document — bold/sized text, no named Word styles, no
+  branding/template customization — explicitly out of scope per
+  roadmap.md; revisit only if a future task asks for it)
+- Word export at very large scale: a Process with many steps each citing
+  several full-resolution screenshots hasn't been exercised — no
+  pagination/section-break handling exists beyond what Word does
+  automatically, and export time/memory for that case is unmeasured
 
 ## Next task
 
-TASK-020 (see roadmap.md) — Word (.docx) functional specification
-export: the product's final artifact — generate a real `.docx` from a
-Process's structured content, with embedded screenshots referenced by
-the relevant steps, via a native "Save As" dialog. Depends on TASK-019
-(done). The first M3 step — M1 and M2 are both now complete.
+TASK-021 (see roadmap.md) — MVP end-to-end hardening and documentation:
+one full manual pass through the entire consultant workflow (create a
+project → live-capture a process via the hotkey/widget → generate the
+AI structure → edit it → export to Word), fixing real friction/
+inconsistency found along the way, then updating README.md's "Current
+status", PROJECT_STATE.md, and docs/architecture.md to describe a
+complete MVP. Depends on TASK-020 (done — every prior M1/M2/M3 step, in
+effect). No net-new features — the roadmap's final step.

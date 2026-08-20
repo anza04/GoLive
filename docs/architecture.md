@@ -3060,10 +3060,133 @@ AI-generated summary appeared, proving regeneration still works
 correctly in the new editor UI and remains a wholly separate operation
 from editing.
 
+## 35. Word (.docx) functional specification export (TASK-020)
+
+**CURRENT.** The product's final artifact (README.md's product
+description: "...export it as a Word functional specification"): a real
+`.docx` file, generated from a Process's structured, AI-generated,
+user-edited content (TASK-017/018/019), with screenshots embedded next
+to the step that cites them, written to a location the user picks
+themselves via a native Save As dialog. **M3 begins here; this is its
+first step.**
+
+**The generator: `docx-rs`.** A pure-Rust, actively-maintained `.docx`
+writer (see DECISIONS.md for the full comparison/why) — no external
+binary, no bundled Word/LibreOffice, no template file to ship. Its API
+is a plain builder: `Docx::new().add_paragraph(Paragraph::new()
+.add_run(Run::new().add_text(...).bold().size(...)))....build()
+.pack(writer)`, where `writer` is anything `Write` — here, a
+`std::fs::File` opened at the user's chosen path. Visual hierarchy
+(title/subtitle/section headers/step titles/body) is plain bold/size on
+runs, not named Word styles (`docx-rs` doesn't ship Word's built-in
+style definitions for you unless you define them yourself — see
+DECISIONS.md) — deliberately simple, matching the "working, honest"
+ceiling the rest of this feature area (TASK-019's editor) already set.
+
+**Document shape.** Title (the Process's own `name`, from
+`ProcessRepository`, not the version's content — a version has no name
+of its own), "Functional Specification" subtitle, the Process's
+description (if any), a Summary section (the version's `content.summary`),
+then a numbered "Process Steps" section: one heading + body per
+`ProcessDraftStep`, followed by every screenshot its `capture_ids` cites
+(a step can cite more than one; a non-screenshot or since-deleted
+capture id is silently skipped — same "describe what's actually there,
+don't fail the whole thing over one missing piece" tolerance
+`ProcessDraftService::generate` already applies to missing media, see
+§32). Multi-line summary/description text is split on `\n` into
+explicit text-wrapping breaks within one paragraph — a Word paragraph
+doesn't otherwise honor embedded newlines.
+
+**Image scaling.** `Pic::new` (via `docx-rs`'s `image` feature, which
+reads a PNG's real pixel dimensions) sizes an embedded image 1:1 to its
+source resolution — a real screen-resolution screenshot would render
+many times wider than any page. `scaled_pic` reads `Pic::new`'s own
+computed `(width, height)` EMU pair and, only if the width exceeds a
+6-inch cap (Letter/A4's usable width at standard margins, with a small
+gutter of its own), rescales both dimensions by the same factor and
+calls `.size(...)` — an image already narrower than the cap is left
+exactly as `Pic::new` computed it, never stretched up.
+
+**The service.** `services::docx_export::DocxExportService::export`
+loads the `ProcessVersion` and its parent `Process` (both `NotFound` if
+either is missing — a version can't outlive a deleted process, but the
+lookup is still explicit, not assumed), validates `target_path` (must
+end in `.docx`; its parent directory must still exist — see below), then
+builds and writes the document via `std::fs::File::create` +
+`Docx::pack`. Read-only over the existing repositories/`MediaStorage` —
+this task adds no new persisted model and no new migration.
+
+**Where the file path comes from — the first user-chosen filesystem
+destination in this app.** The frontend (`services/export.ts`) opens a
+native Save As dialog via `@tauri-apps/plugin-dialog`'s `save()`
+(`tauri-plugin-dialog`, the official first-party plugin, registered as a
+top-level `.plugin(...)` the same way `tauri_plugin_global_shortcut` is
+registered — see `lib.rs`), defaulting to `<ProcessName>.docx` (sanitized
+of characters Windows filenames can't contain) filtered to `.docx`. If
+the user cancels, `save()` resolves to `null` and nothing is exported —
+not an error. If they confirm, the chosen path is sent straight through
+to `export_process_version_to_docx` as an ordinary IPC string argument.
+**It is still validated in Rust, not trusted just because of where it
+came from** (§ "Tauri least privilege" / roadmap.md's own framing for
+this task: "no arbitrary frontend-supplied path reaches native code
+unvalidated") — `DocxExportService::export` rejects a non-`.docx`
+extension and a target whose parent directory no longer exists (e.g. a
+removable drive unplugged between the dialog closing and export
+running) with a clear `AppError::Validation`, before any file write is
+attempted. The main window's capability grant is narrowed to exactly
+`dialog:allow-save` (not the plugin's broader `dialog:default`, which
+also grants Open/Message — neither used anywhere in this app), matching
+every prior capability decision this project has made.
+
+**The command.** One new command, `export_process_version_to_docx`,
+taking `{ version_id, target_path }` — same "explicit input struct, no
+bare multi-word scalar argument" convention every other command in this
+app follows.
+
+**The UI.** `ProcessDraftSection` (TASK-017/018/019) gained an "Export
+to Word" button next to Save. It always exports the currently selected
+version's *persisted* content (re-read by `version_id` on the backend),
+never the live in-memory edit buffer — the button is disabled whenever
+the editor has unsaved edits (`dirty`), with a tooltip explaining why, so
+what actually lands in the exported file is never ambiguous (see
+DECISIONS.md for the full reasoning). A successful export shows the
+chosen path inline; that confirmation is cleared the instant a new edit
+is made, so a stale "Exported to …" message can never be mistaken for
+confirming the newest edit was exported.
+
+**Testing.** `cargo check`/`cargo test` (210 passed — 6 new, 3 ignored
+unchanged) and `tsc --noEmit` clean. `services::docx_export`'s tests
+cover: a missing version/process (`NotFound`), a non-`.docx` target and
+a target whose parent directory doesn't exist (both `Validation`,
+neither writing a file), a real export producing a file that starts with
+the ZIP local-file-header magic bytes (`PK`) — a genuine, if minimal,
+check that the output is a real container, not just "some bytes got
+written" — a step citing a real screenshot Capture alongside a
+non-screenshot and a nonexistent capture id (confirming the export
+still succeeds and doesn't fail over the two uncitable references), and
+`scaled_pic` leaving an already-narrow image's size untouched.
+
+Beyond the automated tests: exported a real Process's real
+generated-and-then-edited draft (at least one step citing a real
+screenshot Capture) through the actual running app's native Save As
+dialog (driven the same Windows UI Automation way as every native
+verification since §31 — `InvokePattern` to click Export, then the
+real, OS-native Save As dialog itself, filled and confirmed the same
+way), then opened the resulting `.docx` file directly in Microsoft Word
+and visually confirmed the title, "Functional Specification" subtitle,
+Summary section, numbered Process Steps with their titles/descriptions,
+and the embedded screenshot all render exactly as expected, at a
+readable, on-page size (not stretched off the page edge) — the specific,
+strongest-available proof of roadmap.md's own definition of done
+("opens correctly in Microsoft Word... contains the expected structure
+and images"), not just "produces a well-formed ZIP" (which a test can
+already confirm on its own, but can't confirm Word actually accepts the
+OOXML inside it).
+
 ## Status
 
 Reflects the state after **TASK-015, two rounds of UI bugfixes,
-TASK-016, TASK-017, TASK-018, and TASK-019**.
+TASK-016, TASK-017, TASK-018, TASK-019, and TASK-020**.
 
 **M1 — Live Capture is complete** — every capture modality the product
 description promises (screenshot, recording, audio, quick markers)
@@ -3093,9 +3216,17 @@ user can now generate, read, edit, save, and regenerate a Process's
 structured content entirely through the UI — editing updates a
 version's content in place, deliberately distinct from regeneration,
 which still always creates a new one; confirmed against the real
-running app and the real database the same way (§34). **The product's
-core AI Structuring loop (M2) is now functionally complete** — TASK-020
-onward is export (M3), not new AI/editing capability. No export
-functionality exists yet. See
+running app and the real database the same way (§34). **M2 — AI
+Structuring is complete.**
+
+**M3 — Export and MVP Completion is underway.** TASK-020: a Process's
+structured content now exports to a real `.docx` functional
+specification — title, summary, numbered steps, and screenshots embedded
+next to the step that cites them — written to a location the user picks
+via a native Save As dialog, confirmed opening correctly in Microsoft
+Word itself, not just producing a well-formed ZIP container (§35).
+**TASK-021 (MVP end-to-end hardening and documentation) is next** — the
+roadmap's final step, closing the loop on the full consultant workflow
+rather than adding new product capability. See
 [PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
 implementation status.
