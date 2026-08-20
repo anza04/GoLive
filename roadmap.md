@@ -256,7 +256,7 @@ in M1 into an editable, structured business process. Deliberately
 sequenced after M1 completes, since AI's input quality depends on having
 every capture modality available first.
 
-### TASK-016 — Windows Credential Manager integration and AI settings
+### TASK-016 ✅ DONE — Windows Credential Manager integration and AI settings
 
 **Depends on:** none beyond M0 (Settings page already exists as a
 placeholder).

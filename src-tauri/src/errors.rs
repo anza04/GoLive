@@ -53,6 +53,25 @@ pub enum AppError {
     /// `media::MediaStorage`.
     #[error("{0}")]
     Capture(String),
+
+    /// The OS credential store (Windows Credential Manager, TASK-016)
+    /// could not be read from or written to — a genuinely different
+    /// failure category from `Storage` (that's this app's own SQLite/
+    /// filesystem area; this is a separate OS subsystem GoLive doesn't
+    /// own). Like `Validation`/`Capture`, the message is an
+    /// author-written, safe, specific string — never the raw `keyring`
+    /// error, which could otherwise leak Windows API detail. See
+    /// `credentials::CredentialStore`.
+    #[error("{0}")]
+    Credential(String),
+
+    /// An outbound network call (TASK-016: testing the stored OpenAI API
+    /// key) failed to reach its destination, timed out, or the API
+    /// rejected it. Like `Capture`/`Credential`, an author-written safe
+    /// string — never the raw `reqwest` error (which can include
+    /// resolved IPs, redirect chains, etc.). See `openai::test_api_key`.
+    #[error("{0}")]
+    Network(String),
 }
 
 impl AppError {
@@ -64,6 +83,8 @@ impl AppError {
             Self::Validation(_) => "validation_error",
             Self::NotFound => "not_found",
             Self::Capture(_) => "capture_error",
+            Self::Credential(_) => "credential_error",
+            Self::Network(_) => "network_error",
         }
     }
 }

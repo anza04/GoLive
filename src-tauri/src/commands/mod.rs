@@ -4,5 +4,6 @@ pub mod foundation;
 pub mod process;
 pub mod project;
 pub mod recording;
+pub mod settings;
 pub mod storage;
 pub mod widget;

@@ -294,6 +294,60 @@ button {
   color: var(--color-text-faint);
 }
 
+/* Settings page — "AI" section (TASK-016). Same card treatment as
+   `.system-status` above (title style included), not a new pattern. */
+
+.settings-section {
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.settings-section__title {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-faint);
+}
+
+.settings-section__intro {
+  margin: calc(var(--space-4) * -1) 0 0;
+  max-width: 60ch;
+}
+
+.settings-key-saved {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.settings-key-saved__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.settings-key-saved__feedback {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.settings-key-saved__feedback--ok {
+  color: var(--color-success);
+}
+
+.settings-key-saved__feedback--error {
+  color: var(--color-danger);
+}
+
 /* Buttons */
 
 .button {

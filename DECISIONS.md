@@ -1822,13 +1822,16 @@ database — never told any open Captures section about it, reproducing
 "I don't see it until I leave and come back" for exactly that one
 creation path, while the dialog-driven path looked completely fixed in
 isolation.
-**Consequence:** not independently re-verified end to end (pressing the
-real global hotkey and watching a live main window update) — this
-environment has no way to drive the native window's UI to confirm that
-visually — but the fix reuses the exact `app.emit(CAPTURE_CREATED_EVENT,
+**Consequence:** independently re-verified end to end during the
+TASK-016 session, once a genuine native-UI-driving technique was found
+(Windows UI Automation — see DECISIONS.md's TASK-016 entry below): the
+real global hotkey was pressed against the real running app with a
+Process selected, and the resulting screenshot appeared in the
+already-open Captures list immediately, with no navigation away and
+back. The fix also reuses the exact `app.emit(CAPTURE_CREATED_EVENT,
 &capture)` call and payload contract the already-proven dialog-driven
 path uses, against a real `Capture` value, and `cargo check`/`cargo
-test` (144 passed) both pass against it.
+test` both pass against it.
 
 **Decision:** removed "Captures" from `ProjectOverview`'s
 `FUTURE_SECTIONS` placeholder list, and gave the workspace's disabled
@@ -1846,3 +1849,108 @@ guessed at further; a broader nav redesign without more specific
 feedback risks repeating exactly what went wrong with the first pass
 (confidently shipping something unverified). Pending the user's
 reaction to this build.
+
+## TASK-016 — Windows Credential Manager integration and AI settings
+
+**Decision:** the OpenAI API key is stored via the `keyring` crate's
+`windows-native` backend (`credentials::WindowsCredentialStore`), not a
+hand-rolled `CredWriteW`/`CredReadW` FFI wrapper against the `windows`
+crate.
+**Reason:** evaluated the same way `cpal` was (see TASK-015's entry
+above): hand-rolling the raw Credential Manager API directly was
+considered and rejected — this is genuinely security-sensitive native
+protocol work (a wrong buffer-length calculation or missing free call
+here is a real vulnerability class, not just a bug), and `keyring` is a
+mature, actively-maintained crate that already solves it correctly, the
+same "prefer the crate over hand-rolling real native complexity"
+reasoning `xcap`/`windows-capture`/`cpal` all used. `default-features =
+false, features = ["windows-native"]` — the other platform backends
+(`apple-native`, `sync-secret-service`) are irrelevant to a Windows-only
+app and would just add unused dependencies, mirroring how `xcap`'s
+`wgc` feature and `tauri-plugin-global-shortcut`'s platform-cfg gating
+were both scoped narrowly for the same reason.
+**Consequence:** the target name Windows actually stores this under is
+`keyring`'s own construction (`"<account>.<service>"`, i.e.
+`openai_api_key.GoLive`), not a literal `"GoLive"` — worth knowing if
+anyone ever needs to inspect or clear it manually via `cmdkey`/Credential
+Manager's UI outside the app. Confirmed for real during this task's
+native verification (see below).
+
+**Decision:** the "test connection" action (`openai::test_api_key`) is
+a single standalone function, not built as part of docs/architecture.md
+§8's `AiService` trait/OpenAI-provider abstraction.
+**Reason:** roadmap.md explicitly scopes that abstraction to TASK-017,
+after this task; building it now would be scope creep into the next
+task's job for a one-off GET request this task only needs to prove a
+key works. `openai::test_api_key` is deliberately small and easy for
+TASK-017 to reuse or discard once the real abstraction exists.
+**Consequence:** TASK-017 will decide whether to reuse this function or
+supersede it entirely — not a constraint on that task, just a note that
+it exists.
+
+**Decision:** `reqwest` was added with `default-features = false,
+features = ["blocking", "rustls-tls"]` — no async runtime ceremony, and
+`rustls-tls` instead of the default `native-tls`.
+**Reason:** the one HTTP call this task needs is a single synchronous
+request inside an already-synchronous `#[tauri::command]` — Tauri runs
+sync commands on its own worker thread pool already, so a blocking
+`reqwest` call doesn't freeze either window's UI, the same reasoning
+every blocking SQLite call in this codebase already relies on; adding
+`tokio`-based async ceremony for one call would be unjustified
+complexity. `rustls-tls` was chosen over the default `native-tls`
+backend to avoid an OpenSSL dependency (Windows' `native-tls` backend
+uses `schannel`, no OpenSSL either, but `rustls` is a pure-Rust TLS
+stack with no C toolchain/build-script dependency at all, the simpler
+of the two on a build machine that doesn't already have one set up).
+**Consequence:** none of TASK-016's own code is async; `AiService`
+(TASK-017) will make its own call on whether the real AI request/
+response flow needs an async client instead — this task's choice here
+doesn't constrain that one.
+
+**Decision:** `credentials::WindowsCredentialStore`'s own tests run for
+real against the actual Windows Credential Manager (not `#[ignore]`d),
+under a dedicated test-only service name (`"GoLive.Test.<test_name>"`)
+with a `Drop`-based cleanup guard.
+**Reason:** unlike the native recording/screenshot engines' `#[ignore]`d
+smoke tests (expensive/slow — they actually capture video or audio),
+credential save/get/clear is fast and, with a distinct test namespace
+and guaranteed cleanup, fully safe to run unattended on every `cargo
+test` without ever touching or risking the real `"GoLive"` production
+entry.
+**Consequence:** genuine coverage of the real OS credential store on
+every test run, not just a mocked trait — a stronger default than this
+project's other native-boundary modules get, justified here because
+getting credential storage wrong has real security consequences a mock
+wouldn't catch (e.g. a target-name construction bug, a silent
+overwrite-vs-append mistake).
+
+**Decision:** verified the entire save/test/clear flow for real against
+the actual running `golive.exe`, using genuine Windows UI Automation
+(`System.Windows.Automation`, PowerShell) rather than stopping at the
+mocked dev-server harness (§24's technique, DECISIONS.md's earlier
+entries) — the first time this technique was used in this project.
+**Reason:** credential storage is different in kind from most of this
+app's other UI — the mocked harness proves the React rendering logic is
+correct, but says nothing about whether the real Rust command actually
+reaches the real Windows Credential Manager, or whether a real network
+call to OpenAI actually round-trips correctly. Those needed real
+verification, not code-review confidence — the same lesson the UI-fixes
+session (above) already learned the hard way about trusting reasoning
+over evidence.
+**Consequence:** `AutomationElement.FromHandle(hwnd)` (the same real
+`hwnd` §24's `EnumWindows` technique already resolves) plus
+`InvokePattern`/`ValuePattern` can click buttons and fill inputs in the
+real WebView2 content for real — proven by: typing a test key through
+the real form and confirming via a raw `CredReadW` P/Invoke call (fully
+independent of GoLive's own code) that it was genuinely stored under
+`openai_api_key.GoLive`; clicking the real "Test connection" button and
+getting a genuine OpenAI 401 rejection back, correctly surfaced as
+"OpenAI rejected that API key."; clicking "Clear" and confirming via
+another `CredReadW` call that the entry was genuinely gone. This
+technique also closed out the previous session's one remaining
+unverified item — the global-hotkey live-sync fix — by firing the real
+registered hotkey via `SendKeys` and watching a live Captures list
+update in the real app (see the UI-fixes entries above, now corrected).
+Recorded as a standing technique in docs/architecture.md §31 for future
+tasks: reach for real UI Automation, not just the mocked harness,
+whenever a fix's correctness depends on real native/OS state.

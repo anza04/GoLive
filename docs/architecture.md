@@ -2553,13 +2553,15 @@ come back" for that one creation path while the dialog-driven path
 (already fixed) looked fine in isolation. Fixed by emitting
 `CAPTURE_CREATED_EVENT` from `handle_capture_shortcut` itself once
 `create_screenshot` returns `Ok`, using the same event/payload contract
-as the command-layer emits. Not independently re-verified end to end
-(pressing the real global hotkey and watching a live main window) — this
-environment has no way to drive the native window's UI to confirm it
-visually — but the fix reuses the identical, already-proven
-`app.emit(CAPTURE_CREATED_EVENT, &capture)` call and payload shape the
-dialog-driven path already demonstrated works, against a real `Capture`
-value (not a mock), and `cargo check`/`cargo test` both pass against it.
+as the command-layer emits. **Independently re-verified end to end**
+during the TASK-016 session (§31), once a genuine native-UI-driving
+technique was found (Windows UI Automation, see the standing note at
+the end of this section): a Process was selected for real through the
+running app's own UI, the real global hotkey (Ctrl+Alt+Shift+S) was
+fired via synthetic input, and the resulting screenshot Capture
+appeared in the already-open Captures list immediately, with no
+navigation away and back — exactly reproducing, and confirming fixed,
+the original bug report.
 
 **Hierarchy: one concrete, verifiable fix; the rest needs the user's
 own eyes.** The one specific, falsifiable hierarchy bug found: the
@@ -2592,27 +2594,171 @@ and Processes tabs, a selected Process's Captures list and a selected
 Capture's detail pane, the New Project dialog) at those widths rather
 than assuming one page's fix generalized. Live sync verified for the
 dialog-driven path by actually submitting `CreateCaptureDialog` in the
-harness and reading the resulting list back. Widget transparency
-verified with a real screenshot (see above) — the first genuine visual
-confirmation of this specific, twice-attempted fix.
+harness and reading the resulting list back — and, added afterward once
+a genuine native-UI-driving technique was found (§31's standing note),
+the global-hotkey path was independently re-verified for real too:
+firing the actual registered hotkey (`SendKeys`) against the real
+running app and watching the resulting screenshot appear in an
+already-open Captures list with no navigation away and back. Widget
+transparency verified with a real screenshot (see above) — the first
+genuine visual confirmation of this specific, twice-attempted fix.
+
+## 31. Windows Credential Manager and AI settings (TASK-016)
+
+**CURRENT.** The first M2 step: securely stores the user's OpenAI API
+key and lets Settings save/clear/test it — no AI feature calls OpenAI
+yet (that's TASK-017's `AiService` abstraction, §8, still ahead).
+
+**Credential storage.** `credentials::CredentialStore` (trait) +
+`credentials::WindowsCredentialStore` (real implementation, backed by
+the `keyring` crate's `windows-native` backend, i.e. the actual Windows
+Credential Manager — not a hand-rolled `CredWriteW`/`CredReadW` FFI
+wrapper) — same "own one OS resource behind a small trait" shape
+`native::screenshot::ScreenshotEngine`/`native::recording::RecordingEngine`
+already established, evaluated and chosen the same way `cpal` was
+(§15): hand-rolling the raw Windows Credential Manager API directly
+against the `windows` crate was considered and rejected as real,
+security-sensitive native protocol work a mature, actively-maintained
+crate already solves correctly (see DECISIONS.md). The key is saved
+under service name `"GoLive"`, account `"openai_api_key"` — Windows
+itself is what makes it survive an application restart, not any GoLive
+code. `services::settings::SettingsService` sits in front of it:
+trims/validates (non-empty, ≤2000 chars — generous, just rejects
+obviously-wrong pasted input) before delegating to the trait, and its
+`test_connection` method is the *only* place the plaintext key is ever
+read back out of the store, for exactly as long as it takes to hand it
+to one outbound call — `SettingsService` itself has no method that
+returns the key to a caller, and `commands::settings` never exposes one
+either; the frontend only ever learns *whether* a key is set
+(`has_api_key`), never the key.
+
+**"Test connection" is deliberately not the AI service abstraction.**
+`openai::test_api_key` (`src-tauri/src/openai.rs`) is a single, small,
+standalone function — one `reqwest::blocking` GET against OpenAI's
+`/v1/models` endpoint (cheap: no completion tokens billed, a 200 only
+happens if the key was accepted) — not a trait, not a provider
+abstraction. §8's `AiService` trait + OpenAI implementation is TASK-017's
+job, explicitly out of scope here per roadmap.md; this function exists
+only so "test connection" has something real to call, and TASK-017 is
+free to reuse or replace it once the real abstraction exists.
+
+**No new Tauri capability was needed.** Both the credential-store calls
+and the `reqwest` HTTP call happen entirely in Rust, invoked from inside
+`#[tauri::command]` functions — same reasoning §13 already documents for
+`hotkey.rs`'s Rust-side global-shortcut handling: native/outbound calls
+made from Rust code are not gated by the frontend capability ACL at all;
+only IPC crossing into the webview is. `capabilities/default.json` is
+unchanged.
+
+**Settings UI.** `SettingsPage` gained an "AI" section above the
+existing "System" status card (same card styling, `.settings-section`
+mirrors `.system-status`): an empty-state form (a password-masked input
++ Save) when no key is set, and once one is — a `StatusPill` reading
+"API key saved" (never the key), plus "Test connection" and "Clear"
+actions. Testing shows one of three outcomes inline: "Connected — the
+key works," the specific rejection reason ("OpenAI rejected that API
+key"), or a network-failure message — never a raw `reqwest`/HTTP error.
+Clearing returns to the empty-state form. `services/settings.ts` is the
+usual thin `invoke()` wrapper layer (`saveApiKey`, `hasApiKey`,
+`clearApiKey`, `testApiKeyConnection`) — no component calls `invoke()`
+directly, same convention every other feature follows.
+
+**`AppError` gained two variants:** `Credential(String)` (Windows
+Credential Manager read/write/delete failures) and `Network(String)`
+(the OpenAI connection test failing to reach/parse a response) — both
+author-written safe strings, like `Capture(String)`, never the raw
+`keyring`/`reqwest` error text (which could otherwise leak Windows API
+or connection detail to the frontend).
+
+**Testing:** `cargo check`/`cargo test` (159 passed — 15 new, 3 ignored
+unchanged — the pre-existing native smoke tests for screen/audio
+recording) and `tsc --noEmit` clean. Unlike the native recording/
+screenshot engines, `credentials::WindowsCredentialStore`'s own tests
+run for real, not `#[ignore]`d: they exercise the actual Windows
+Credential Manager (save → get → clear → confirm gone, overwrite, clear-
+when-absent-is-not-an-error) under a dedicated test-only service name
+(`"GoLive.Test.<test_name>"`, never the real `"GoLive"`) with a `Drop`-
+based cleanup guard so a mid-test panic still can't leave a stray entry
+behind — safe to run unattended because credential read/write/delete is
+fast and fully reversible, unlike actually capturing video/audio.
+`services::settings::SettingsService` is tested separately against an
+in-memory fake `CredentialStore` (never touching the real store), the
+same "service tested against a fake trait impl" convention every other
+domain service uses. The Settings UI was first exercised in the mocked
+dev-server harness (§24's technique): empty state → save → saved state
+(key never re-displayed) → Test connection succeeding → Clear → back to
+empty state, and separately a rejected-key path showing the exact
+backend error text.
+
+Then, because credential storage warranted a stronger standard than the
+mocked harness, this was independently re-verified for real against the
+actual running `golive.exe` using genuine Windows UI Automation (see the
+standing note below) rather than simulated JS: typed a test key into
+the real Settings form and clicked the real Save button, then confirmed
+via a raw `CredReadW` P/Invoke call (bypassing GoLive's own code
+entirely) that the exact key was genuinely present in the real Windows
+Credential Manager under target `openai_api_key.GoLive`. Clicked the
+real "Test connection" button — a genuine network call to the real
+OpenAI API, which correctly rejected the (intentionally invalid) test
+key, and the UI showed "OpenAI rejected that API key." Clicked "Clear"
+and confirmed via another raw `CredReadW` call that the entry was
+genuinely gone. Every layer — React UI → Tauri invoke → Rust command →
+`SettingsService` → `WindowsCredentialStore` → `keyring` → the real OS
+credential store, and separately → `openai::test_api_key` → the real
+OpenAI API — was exercised for real in this one pass, not mocked.
+
+**Not verified:** the success path with a genuine, working OpenAI API
+key (this environment has none to test with) — everything up to and
+including "a non-2xx response is correctly turned into a safe error
+message" is now verified for real above; only "does a valid key
+actually get a 2xx" remains unconfirmed. A developer with a real OpenAI
+API key should do that one check.
+
+**Standing technique note — real Windows UI Automation, not just the
+mocked-IPC dev-server harness (§24).** Discovered and used for the
+first time in this session: `System.Windows.Automation` (PowerShell,
+built into Windows) can drive the actual running native app's WebView2
+content for real — `AutomationElement.FromHandle(hwnd)` (get the real
+main-window `hwnd` the same way §24's `EnumWindows` approach already
+does), then `FindAll`/`FindFirst` with a `PropertyCondition` on
+`ControlTypeProperty`/`AutomationIdProperty`/`NameProperty` to locate a
+button/input, `InvokePattern` to click it, `ValuePattern.SetValue` to
+fill a text input — genuine accessibility-tree automation against the
+real WebView2 content, not simulated DOM events in a browser tab. This
+is strictly stronger evidence than the mocked dev-server harness
+(§24) for anything that depends on the *real* native window/backend —
+this session used it to independently confirm both the Windows
+Credential Manager round trip above and, separately, the global-hotkey
+live-capture-sync fix (§30) by firing the actual registered hotkey via
+`System.Windows.Forms.SendKeys` and watching a live Captures list
+update in the real running app. Reach for this — not just the mocked
+harness — whenever a fix's correctness genuinely depends on the real
+native process/OS state (credential stores, file I/O, global shortcuts,
+window geometry) rather than just React rendering logic, which the
+mocked harness already covers well.
 
 ## Status
 
-Reflects the state after **TASK-015 and two rounds of UI bugfixes**
-(microphone audio capture — a recording can now optionally include the
-default microphone, muxed into the same MP4 as the screen video;
-**M1 — Live Capture is now complete** — every capture modality the
-product description promises (screenshot, recording, audio, quick
+Reflects the state after **TASK-015, two rounds of UI bugfixes, and
+TASK-016** (microphone audio capture — a recording can now optionally
+include the default microphone, muxed into the same MP4 as the screen
+video; **M1 — Live Capture is now complete** — every capture modality
+the product description promises (screenshot, recording, audio, quick
 markers) exists and works, reachable from both the main window and the
 floating widget, and stays in sync between them live, including the
 global-hotkey path; the Captures section's creation controls are
 consolidated into one menu; the app doesn't overflow its own window down
 to its documented 760px minimum; the widget's collapsed dot is confirmed
 by an actual screenshot to render as a genuine transparent circle, not
-an opaque rectangle. §30 has the second pass's full diagnosis — the
-first pass (§29) shipped three fixes that didn't hold up under real
-testing, corrected here rather than just re-claimed. No AI or export
-functionality exists yet (M2/M3, still ahead) — GoLive can capture a
-full live working session but cannot yet turn it into a structured
-document). See [PROJECT_STATE.md](../PROJECT_STATE.md) for the
-authoritative current implementation status.
+an opaque rectangle (§30 has the second UI-bugfix pass's full diagnosis
+— the first pass, §29, shipped three fixes that didn't hold up under
+real testing, corrected there rather than just re-claimed); **M2 — AI
+Structuring has begun** — the user's OpenAI API key can now be saved to
+(and read from) the Windows Credential Manager, tested against the real
+OpenAI API, and cleared, all without ever touching SQLite or any file
+GoLive writes (§31), though no AI feature actually calls OpenAI to
+generate anything yet — TASK-017 (the real `AiService` trait/OpenAI
+implementation and the first actual process-generation command) is
+next. No export functionality exists yet (M3, still ahead)). See
+[PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
+implementation status.
