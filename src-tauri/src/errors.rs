@@ -69,9 +69,18 @@ pub enum AppError {
     /// key) failed to reach its destination, timed out, or the API
     /// rejected it. Like `Capture`/`Credential`, an author-written safe
     /// string — never the raw `reqwest` error (which can include
-    /// resolved IPs, redirect chains, etc.). See `openai::test_api_key`.
+    /// resolved IPs, redirect chains, etc.). See `ai::openai::test_api_key`.
     #[error("{0}")]
     Network(String),
+
+    /// The AI provider's call *completed* (unlike `Network`, which means
+    /// the call itself failed) but its response couldn't be turned into
+    /// usable structured content — e.g. a refusal, or output that didn't
+    /// match the requested JSON schema despite strict mode (TASK-017).
+    /// Like `Capture`/`Credential`/`Network`, an author-written safe
+    /// string — never the raw response body. See `ai::openai::OpenAiService`.
+    #[error("{0}")]
+    Ai(String),
 }
 
 impl AppError {
@@ -85,6 +94,7 @@ impl AppError {
             Self::Capture(_) => "capture_error",
             Self::Credential(_) => "credential_error",
             Self::Network(_) => "network_error",
+            Self::Ai(_) => "ai_error",
         }
     }
 }

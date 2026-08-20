@@ -2737,28 +2737,272 @@ native process/OS state (credential stores, file I/O, global shortcuts,
 window geometry) rather than just React rendering logic, which the
 mocked harness already covers well.
 
+## 32. AI service abstraction and raw process-generation pipeline (TASK-017)
+
+**CURRENT.** §8's first real occupant: proves the round trip — a
+Process's Captures in, a genuinely AI-structured result out — before
+anything persists it (TASK-018) or lets a user edit it (TASK-019).
+
+**The abstraction.** `ai::AiService` (trait) + `ai::openai::OpenAiService`
+(the one implementation) — nothing above the trait ever references
+OpenAI-specific types or endpoints, matching §8's diagram exactly.
+`ai::ProcessDraft { summary, steps: Vec<ProcessDraftStep> }`,
+`ProcessDraftStep { title, description, capture_ids }` — deliberately
+minimal (a summary plus an ordered list of steps); TASK-018 owns
+deciding whether this needs to grow before it becomes the real
+persisted shape. `capture_ids` exists from the start (not retrofitted
+later) because TASK-020's "embed screenshots referenced by the relevant
+steps" needs that link, and re-deriving it after the fact with no model
+context available would be much harder than carrying it through from
+the beginning.
+
+**`services::process_draft::ProcessDraftService`** is the one place
+that reads a Process's identity (`ProcessRepository`), its Captures'
+metadata (`CaptureRepository`), and their screenshot bytes
+(`MediaStorage`), and assembles them into an `ai::ProcessDraftRequest`
+— the same layering every other domain service uses, now depending on
+`AiService` too. Notable choices:
+- Captures are re-sorted by `created_at` ascending before sending —
+  `CaptureRepository::list_by_process` returns `updated_at DESC` (the
+  list-display order), which is the wrong order for "describe what
+  actually happened, in order"; this was caught before it became a bug,
+  not fixed after (a test — `generate_sorts_captures_chronologically_before_sending`
+  — pins it).
+- A missing screenshot file for a `screenshot`-type Capture (unexpected,
+  but not impossible) doesn't fail the whole generation — it's
+  described from title/description alone, same as a Recording/Note.
+- A defensive `MAX_CAPTURES = 60` cap — not a product requirement, just
+  a guard against one runaway request (timeout/cost) for a badly-scoped
+  Process; nothing in roadmap.md TASK-017 asked for a limit.
+
+**The OpenAI call.** Chat Completions (`POST /v1/chat/completions`),
+not the newer Responses API — chosen deliberately over what OpenAI's
+current docs recommend for new projects, because its request/response
+shape (`messages: [{role, content: [{type:"text"|"image_url", ...}]}]`,
+`response_format: {type:"json_schema", json_schema:{name, strict, schema}}`,
+result at `choices[0].message.content` as a JSON *string* needing a
+second `serde_json::from_str`) is far better-established and
+lower-implementation-risk to get right than a newer endpoint this
+project had only web-search-summarized documentation for (see
+DECISIONS.md) — and Chat Completions remains fully supported, not
+deprecated. Strict-mode JSON schema requires every object to set
+`additionalProperties: false` and list every property as required (no
+optional fields) — the schema is hand-built via `serde_json::json!`,
+and a test (`process_draft_json_schema_is_strict_mode_compatible`)
+checks that invariant structurally so a future hand-edit can't silently
+break it.
+
+Screenshots are sent as `image_url` content parts using a
+`data:image/png;base64,...` data URI (the `base64` crate,
+`default-features = false` — no other feature needed for plain
+encode/decode). The model is referenced by capture *number* (1-based,
+assigned by the prompt itself, see `ai::openai::build_request`) rather
+than its real id — asking a model to echo back an exact 36-character
+UUID is a real, avoidable source of transcription errors; numbers are
+far more reliable. `finalize_draft` maps returned numbers back to real
+capture ids afterward, silently dropping (with a logged count) any
+number outside the range the request actually sent — `strict: true`
+guarantees the *shape* of `capture_indices` (an array of integers), not
+that each integer is one the model was actually given.
+
+**Error handling.** `AppError` gained an `Ai(String)` variant — distinct
+from `Network` (the call itself failed to complete): `Ai` means the
+call *succeeded* but the response couldn't be turned into usable
+structured content (a refusal, or output that didn't parse against the
+schema despite strict mode). A shared `describe_openai_error(status,
+body)` helper (used by both `test_api_key`, TASK-016, and
+`generate_process_draft` here) parses OpenAI's `{"error":{"code",
+"message",...}}` envelope for specific, known error codes —
+`insufficient_quota` gets its own actionable message ("no available
+quota — check billing") distinct from generic rate-limiting or an
+unrecognized status — rather than one generic "unexpected response"
+message for every non-2xx status. This was added *because* of what
+TASK-017's own real-key verification below actually returned, not
+speculatively.
+
+**Command and UI.** One command, `generate_process_draft(process_id)`,
+thin per usual. `ProcessDraftSection` (nested in `ProcessDetail`,
+replacing what used to be a disabled `.reserved-section` "AI analysis"
+placeholder tile — the same "remove it from the placeholder list once
+it's real" precedent §30/DECISIONS.md already established for
+Processes/Captures) — a "Generate"/"Regenerate" button and a plain
+read-only view (summary + numbered steps, each showing how many
+captures it's based on). No editing, no persistence, no per-capture
+thumbnail linking yet — all explicitly TASK-018/019/020's job, not
+this one's.
+
+**Testing — the strongest verification standard used in this project
+so far.** `cargo check`/`cargo test` (173 passed — 14 new, 3 ignored
+unchanged) and `tsc --noEmit` clean; unit coverage for
+`ProcessDraftService`'s validation (no key, missing process, zero
+captures, over the cap, chronological ordering) against fakes, and for
+`ai::openai`'s pure logic (index→id mapping, out-of-range dropping,
+schema strict-mode-compatibility, and `describe_openai_error`'s status/
+code mapping) with no network involved.
+
+Beyond that: this task's core claim — "the request/response shape
+against the real OpenAI API is actually correct" — was never left to
+rest on documentation alone. A temporary native example
+(`examples/process_draft_spotcheck.rs`, deleted after use, same
+established convention as TASK-013's native smoke tests) called
+`ai::openai::OpenAiService` directly with the user's real, already-
+saved API key (from TASK-016). The result: a real `429` response with
+body `{"error":{"code":"insufficient_quota", ...}}` — the user's
+OpenAI account has no billing/credits configured. This is **strong
+positive evidence the request shape is correct**, not a failure to
+learn from: OpenAI validates a request's structure (model name exists,
+`response_format`/schema is well-formed, message content is parseable)
+*before* the quota check — a malformed request gets a `400` with a
+parsing/validation error, not a `429` about billing. Getting this
+specific error, rather than any kind of 400, means the request reached
+real processing.
+
+Then, using the same Windows UI Automation technique §31 established:
+launched the freshly built `golive.exe`, navigated to a real Process
+with a real Capture, and clicked the real "Generate" button. The exact
+same `insufficient_quota` message appeared in the real UI — confirming
+the *entire* pipeline (React → Tauri invoke → command →
+`ProcessDraftService` → real Capture/Process data → real
+`WindowsCredentialStore` key read → real OpenAI call → real error
+response → `describe_openai_error` → back through Tauri → displayed)
+works for real, end to end, with the one exception below.
+
+**Update — the account got billing, and a real successful generation is
+now confirmed too.** The user added billing to the OpenAI account
+behind the saved key, then asked for this to be re-verified. The same
+temporary example was recreated, run, and deleted again (identical
+convention as above): a real `POST /v1/chat/completions` call returned
+a genuine 200 with schema-conformant JSON — `finalize_draft`'s
+happy-path parsing, previously unverified with a live response, worked
+correctly, and the index→id mapping was correct (three note Captures in
+→ three steps out, each `capture_ids` correctly pointing at the one
+capture it was built from). Then the identical check was repeated
+through the real running app's UI (Windows UI Automation, §31): clicked
+the real "Regenerate" button on a real Process, and a genuine
+AI-generated summary and step list — built from that Process's actual
+name/description/Capture — rendered correctly in `ProcessDraftSection`.
+Every layer of this pipeline, including the actual success path, is now
+confirmed working against the real OpenAI API and the real running app.
+No further verification gap remains for TASK-017.
+
+## 33. Structured process content domain and versioning (TASK-018)
+
+**CURRENT.** Persists TASK-017's generation result properly, satisfying
+§5's rule this task exists to enforce: *"AI-generated process
+regeneration must not silently overwrite a previous process version."*
+
+**The entity.** `models::process_version::ProcessVersion { id,
+process_id, content: ai::ProcessDraft, created_at }` — 1:N with
+Process (`process_versions.process_id REFERENCES processes(id) ON
+DELETE CASCADE`, the same relationship shape every prior domain uses),
+persisted via `migrations/0005_process_versions.sql`, the first
+migration since `0004_captures.sql`. Two choices worth calling out:
+- **`content` is a JSON blob (`TEXT`), not normalized into separate
+  step/capture-reference tables.** Nothing in this task needs to query
+  or edit a version's content at the field level — TASK-019 (the editor
+  UI) is what actually will, and it can normalize then if it needs to.
+  Storing `ai::ProcessDraft` directly (already `Serialize`/`Deserialize`,
+  already provider-agnostic per §8) avoids inventing a second,
+  structurally-identical persisted-content type that could drift from
+  the AI-transport one.
+- **No `updated_at`, unlike every other model in this app.** A
+  ProcessVersion is genuinely immutable and append-only at this stage —
+  regenerating always `INSERT`s a new row, never `UPDATE`s an existing
+  one (there is no `update` method on `ProcessVersionRepository` at
+  all — the trait's surface reflects the invariant structurally, not
+  just by convention). TASK-019 decides what "editing a version" means,
+  if anything, and can add `updated_at` then if it turns out to need it.
+
+**The repository** (`repositories::process_version`) has exactly the
+methods this task needs and no more: `create`, `list_by_process`
+(`created_at DESC`), `get`, and `get_latest_by_process` — a dedicated
+query for "the newest version," not `list_by_process(...).first()` at
+a caller, since a version's `content` can be a sizable JSON blob and
+fetching every version just to look at the newest one would be real,
+avoidable waste.
+
+**The service.** `services::process_draft::ProcessDraftService::generate`
+(TASK-017's method, extended) now persists its result as a new
+`ProcessVersion` before returning it — the command's return type
+changed from the bare `ai::ProcessDraft` to the full `ProcessVersion`
+(id + timestamp + content) accordingly. Two new read methods,
+`list_versions`/`get_version`, satisfy roadmap.md's "versions are
+listable and retrievable" directly, plus `get_latest_version` for the
+UI's "show what was last generated" use (below) — all three are thin
+delegations to the repository, no new business logic.
+
+**The UI.** `ProcessDraftSection` (TASK-017) gained a `useEffect` that
+loads the latest version on mount via `get_latest_process_version`
+(new command) and shows it immediately, instead of always starting
+blank — a Process's most recent AI draft now survives leaving and
+returning to the page, the same way its Captures already do; without
+this, TASK-018's persistence would exist but be invisible to a user
+between generations. Clicking "Generate"/"Regenerate" still shows the
+freshly created version's content immediately (via the command's own
+return value), matching TASK-017's original behavior.
+
+**Testing.** `cargo check`/`cargo test` (192 passed — 19 new, 3 ignored
+unchanged) and `tsc --noEmit` clean. Repository tests cover the DoD
+literally (`generating_twice_produces_two_retrievable_versions_neither_overwriting_the_other`),
+plus cascade-delete, reopening-the-database survival, and
+`get_latest_by_process`. Service tests cover the same invariant one
+layer up (`generate_never_overwrites_a_previous_version_each_call_is_a_new_one`,
+against a real in-memory fake repository, not a single-slot stub —
+chosen specifically so a test could observe "two rows accumulated,"
+not just "the last call's result"). Two new `db::tests` pin the
+migration's table/index/foreign-key shape and the expected
+`user_version`, the same pattern every prior migration got.
+
+Beyond the automated tests: this task's core DoD claim — "generating
+twice produces two retrievable versions, neither overwriting the
+other" — was verified against the real running app and the real
+on-disk database, not just fakes. Using the real UI Automation
+technique (§31): clicked "Generate" for real in the freshly built app,
+confirmed the result, then **fully quit and relaunched the application**
+and confirmed the exact same version reappeared automatically on the
+Process's next load — genuine SQLite persistence surviving a real
+process restart, not an in-memory artifact. Then clicked "Regenerate"
+again and independently confirmed, via a temporary standalone example
+(deleted after use, same convention as TASK-017's) that opened the
+real `golive.db` file directly with its own `rusqlite::Connection` —
+bypassing every layer of this app's own code, including the repository
+under test — that the `process_versions` table held **two** rows for
+that Process, with distinct ids, distinct timestamps, and distinct
+real JSON content, neither overwriting the other. This is the
+strongest verification standard available: not a test against a fake,
+not even a test against a temp-directory database, but an independent
+read of the actual file the shipped application writes to.
+
 ## Status
 
-Reflects the state after **TASK-015, two rounds of UI bugfixes, and
-TASK-016** (microphone audio capture — a recording can now optionally
-include the default microphone, muxed into the same MP4 as the screen
-video; **M1 — Live Capture is now complete** — every capture modality
-the product description promises (screenshot, recording, audio, quick
-markers) exists and works, reachable from both the main window and the
-floating widget, and stays in sync between them live, including the
-global-hotkey path; the Captures section's creation controls are
-consolidated into one menu; the app doesn't overflow its own window down
-to its documented 760px minimum; the widget's collapsed dot is confirmed
-by an actual screenshot to render as a genuine transparent circle, not
-an opaque rectangle (§30 has the second UI-bugfix pass's full diagnosis
-— the first pass, §29, shipped three fixes that didn't hold up under
-real testing, corrected there rather than just re-claimed); **M2 — AI
-Structuring has begun** — the user's OpenAI API key can now be saved to
-(and read from) the Windows Credential Manager, tested against the real
-OpenAI API, and cleared, all without ever touching SQLite or any file
-GoLive writes (§31), though no AI feature actually calls OpenAI to
-generate anything yet — TASK-017 (the real `AiService` trait/OpenAI
-implementation and the first actual process-generation command) is
-next. No export functionality exists yet (M3, still ahead)). See
+Reflects the state after **TASK-015, two rounds of UI bugfixes,
+TASK-016, TASK-017, and TASK-018**.
+
+**M1 — Live Capture is complete** — every capture modality the product
+description promises (screenshot, recording, audio, quick markers)
+exists and works, reachable from both the main window and the floating
+widget, and stays in sync between them live, including the global-hotkey
+path; the Captures section's creation controls are consolidated into
+one menu; the app doesn't overflow its own window down to its documented
+760px minimum; the widget's collapsed dot is confirmed by an actual
+screenshot to render as a genuine transparent circle. §30 has the
+second UI-bugfix pass's full diagnosis — the first pass, §29, shipped
+three fixes that didn't hold up under real testing, corrected there
+rather than just re-claimed.
+
+**M2 — AI Structuring is underway.** TASK-016: the user's OpenAI API
+key saves to (and reads from) the Windows Credential Manager, tests
+against the real OpenAI API, and clears — never touching SQLite or any
+file GoLive writes (§31). TASK-017: given a Process with real Captures,
+`generate_process_draft` sends them to OpenAI and returns a genuinely
+AI-structured draft — every layer of that pipeline, including a real
+successful generation with schema-conformant output, is confirmed
+working against the live OpenAI API and the real running app (§32).
+TASK-018: every generation now persists as an immutable `ProcessVersion`
+— regenerating never overwrites a previous one (§5's rule), confirmed
+not just by tests but by directly reading the real on-disk database
+after a real app restart (§33). TASK-019 (the editor UI — read, edit,
+switch between, and regenerate a Process's versions) is next. No export
+functionality exists yet (M3, still ahead). See
 [PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
 implementation status.

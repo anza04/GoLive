@@ -7,9 +7,9 @@
 //! unlike `commands::capture`/`commands::process` there is no `DbService`/
 //! `MediaStorage` to pull out of Tauri's managed state here.
 
+use crate::ai::openai;
 use crate::credentials::WindowsCredentialStore;
 use crate::errors::AppError;
-use crate::openai;
 use crate::services::settings::SettingsService;
 use serde::Deserialize;
 

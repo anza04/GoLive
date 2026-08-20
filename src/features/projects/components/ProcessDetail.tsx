@@ -3,6 +3,7 @@ import { formatDate } from "../../../utils/formatDate";
 import { ProcessStatusBadge } from "./ProcessStatusBadge";
 import { EditProcessDialog } from "./EditProcessDialog";
 import { CapturesSection } from "./CapturesSection";
+import { ProcessDraftSection } from "./ProcessDraftSection";
 import type { Process } from "../services/processes";
 
 interface ProcessDetailProps {
@@ -13,14 +14,6 @@ interface ProcessDetailProps {
    * drops it from the list and clears selection. */
   onGone: () => void;
 }
-
-// Informational-only preview of what a process will eventually own
-// (TASK-009+: recordings, transcripts, AI analysis). No
-// clickable/functional-looking controls. "Captures" used to be here too —
-// TASK-008 replaced it with the real `CapturesSection` below.
-const RESERVED_SECTIONS = [
-  { title: "AI analysis", description: "AI-assisted process analysis will be available here." },
-] as const;
 
 export function ProcessDetail({ process, onUpdated, onDeleteRequested, onGone }: ProcessDetailProps) {
   const [editOpen, setEditOpen] = useState(false);
@@ -52,14 +45,7 @@ export function ProcessDetail({ process, onUpdated, onDeleteRequested, onGone }:
 
       <CapturesSection processId={process.id} />
 
-      <div className="reserved-sections">
-        {RESERVED_SECTIONS.map((section) => (
-          <div className="reserved-section" key={section.title}>
-            <h4 className="reserved-section__title">{section.title}</h4>
-            <p className="reserved-section__hint">{section.description}</p>
-          </div>
-        ))}
-      </div>
+      <ProcessDraftSection processId={process.id} />
 
       {editOpen && (
         <EditProcessDialog

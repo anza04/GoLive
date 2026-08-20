@@ -1,4 +1,5 @@
 pub mod active_process;
+pub mod ai;
 pub mod capture;
 pub mod foundation;
 pub mod process;

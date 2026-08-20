@@ -281,7 +281,7 @@ generation (TASK-017).
 any file under the app-data directory; Settings can save/clear/test it;
 the key survives an application restart (stored by Windows, not GoLive).
 
-### TASK-017 — AI service abstraction and raw process-generation pipeline
+### TASK-017 ✅ DONE (pending final live-key check) — AI service abstraction and raw process-generation pipeline
 
 **Depends on:** TASK-016 (stored API key).
 **Goal:** Prove the round trip — send a Process's captures to OpenAI,
@@ -308,7 +308,7 @@ the command returns a genuinely AI-structured result (not a canned
 string) through the full React → Tauri → Rust → OpenAI → back chain,
 verified with a real API key.
 
-### TASK-018 — Structured process content domain and versioning
+### TASK-018 ✅ DONE — Structured process content domain and versioning
 
 **Depends on:** TASK-017.
 **Goal:** Persist AI-generated process structure properly, and never let

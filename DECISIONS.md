@@ -1954,3 +1954,184 @@ update in the real app (see the UI-fixes entries above, now corrected).
 Recorded as a standing technique in docs/architecture.md §31 for future
 tasks: reach for real UI Automation, not just the mocked harness,
 whenever a fix's correctness depends on real native/OS state.
+
+## TASK-017 — AI service abstraction and raw process-generation pipeline
+
+**Decision:** the OpenAI call uses the Chat Completions API
+(`/v1/chat/completions`), not the newer Responses API OpenAI's current
+docs recommend for new projects.
+**Reason:** correctness mattered more than using the newest-recommended
+endpoint. Responses API details for this session came from web-search-
+summarized documentation (a small model summarizing fetched pages, not
+first-hand certainty) — real but genuinely lower-confidence than Chat
+Completions' vision + structured-output shape, which is extremely
+well-established and long-documented. Chat Completions is not
+deprecated (OpenAI still fully supports it), so this isn't a
+correctness-for-modernity trade — just picking the implementation this
+session could get right with the least risk of a subtly wrong request
+shape, then verifying that choice for real (see below) rather than
+trusting either source blindly.
+**Consequence:** TASK-017's real-key verification (below) confirms this
+was the right call — the request reached real OpenAI processing (a
+`429 insufficient_quota`, not a `400` malformed-request error). A
+future task could still migrate to the Responses API if there's a
+concrete reason to (e.g. a capability Chat Completions lacks); nothing
+here locks that door, since callers only ever see `ai::AiService`, never
+the endpoint choice.
+
+**Decision:** screenshots are sent to the model referenced by a 1-based
+capture *number* assigned in the prompt (`ai::openai::build_request`),
+not by their real UUID; `finalize_draft` maps numbers back to real ids
+afterward, dropping any out-of-range number.
+**Reason:** `strict: true` guarantees the *shape* of a JSON field (e.g.
+`capture_indices: array of integer`) but not its *values* — nothing
+stops a model from hallucinating a `capture_id` string that was never
+in the request. Asking it to echo back an exact 36-character UUID is
+also a real, avoidable source of pure transcription error a short
+integer doesn't have. Numbers were chosen specifically to reduce both
+failure modes at once.
+**Consequence:** the index-based referencing is entirely internal to
+`ai::openai` — the public `ai::ProcessDraft`/`ProcessDraftStep` types
+(and everything above them) only ever see real capture ids, so a future
+second `AiService` implementation is free to reference captures a
+completely different way without this being part of the trait contract.
+
+**Decision:** `AppError` gained a fourth network-adjacent variant, `Ai(String)`,
+distinct from `Network(String)`.
+**Reason:** these are genuinely different failure categories a user
+should understand differently. `Network` means the call itself didn't
+complete (unreachable, timed out, non-2xx status). `Ai` means it *did*
+complete — OpenAI returned 200 — but the result wasn't usable (a
+refusal, or output that didn't parse against the schema despite strict
+mode). Collapsing both into one message would obscure which of "check
+your connection" vs. "something about this specific request/response
+didn't work" actually applies.
+**Consequence:** `describe_openai_error` (shared by TASK-016's
+`test_api_key` and this task's `generate_process_draft`) parses OpenAI's
+`{"error":{"code",...}}` envelope for known codes and returns the right
+variant — `insufficient_quota` specifically, discovered from a *real*
+OpenAI response during this task's own verification (see below), not
+guessed at — with plain rate-limiting and everything else falling back
+to a generic `Network` message.
+
+**Decision:** verified the request/response shape against the real
+OpenAI API using a temporary native example
+(`examples/process_draft_spotcheck.rs`, deleted after use — the same
+established convention as TASK-013's native smoke tests), with the
+user's real, already-saved API key, before considering the
+implementation trustworthy.
+**Reason:** the request shape was assembled from a mix of confident
+first-hand knowledge (Chat Completions' general shape) and less-certain
+web-search-summarized fragments (the Responses API alternative that was
+ultimately not used, and some structured-output details). Given how
+badly this project's own UI-fixes session was burned earlier by trusting
+reasoning over evidence, shipping an AI integration on documentation
+alone — with no way to know if the request would even be accepted —
+was not an acceptable risk for a task whose entire "definition of done"
+is "verified with a real API key."
+**Consequence:** the real API returned `429 insufficient_quota` — the
+user's OpenAI account has no billing configured. This is genuinely
+useful, positive evidence, not just a blocked test: OpenAI validates a
+request's structure (model exists, `response_format`/schema is
+well-formed, message content parses) *before* checking quota, so a
+`429` here (rather than any `400`) means the request reached real
+processing. The same real error then reappeared, byte-for-byte, when
+the "Generate" button was pressed for real in the actual running app
+(via the Windows UI Automation technique §31/DECISIONS.md's TASK-016
+entry established) — confirming the entire pipeline end to end except
+the one thing genuinely impossible to verify without OpenAI billing
+configured: a real successful generation. That one check is explicitly
+left for whenever the user's account has quota (see
+docs/architecture.md §32, PROJECT_STATE.md).
+
+**Update — the user added billing and asked for re-verification.** A
+temporary example was recreated, run, and deleted again: a real `POST
+/v1/chat/completions` call returned a genuine 200 with schema-conformant
+JSON (three note Captures in, three correctly-ordered steps out, each
+`capture_ids` correctly pointing at the one capture it came from) —
+`finalize_draft`'s happy-path parsing worked correctly against a real
+response for the first time. The identical check was then repeated
+through the real running app: clicked the real "Regenerate" button on a
+real Process, and a genuine AI-generated summary/step list rendered
+correctly. No verification gap remains for TASK-017.
+
+## TASK-018 — Structured process content domain and versioning
+
+**Decision:** `ProcessVersion.content` stores the full `ai::ProcessDraft`
+as a JSON blob (one `TEXT` column), not normalized into separate
+step/capture-reference tables.
+**Reason:** nothing in this task's own scope needs to query or edit a
+version's content at the field level — that's TASK-019's job
+(roadmap.md explicitly excludes the editor UI here), and it's free to
+normalize the data then if it turns out to need to. Storing
+`ai::ProcessDraft` directly (already `Serialize`/`Deserialize`, already
+provider-agnostic per §8) avoids inventing a second,
+structurally-identical persisted type that could silently drift from
+the AI-transport one — "start simple, don't model structure nothing
+reads yet" applied to persistence the same way it's applied everywhere
+else in this project.
+**Consequence:** `models::process_version` depends on `ai::ProcessDraft`
+— a models-layer type depending on the AI layer, which is fine here
+since `ai` has no dependency back on `models` (no cycle), but is a
+slightly unusual layering worth naming explicitly should a future task
+need to reason about it. TASK-019, if it wants field-level queries over
+version content, will need to either parse this JSON at the service
+layer or introduce a genuinely normalized schema then.
+
+**Decision:** `ProcessVersion` has no `update` method on its repository
+trait, and no `updated_at` column/field at all — unlike every other
+model in this app.
+**Reason:** this is the literal mechanism behind §5's rule ("AI-generated
+process regeneration must not silently overwrite a previous process
+version") — not just a convention followed by discipline, but something
+structurally impossible to violate: there is no method to call that
+would update an existing row. Regenerating always `INSERT`s.
+**Consequence:** if TASK-019 decides a user should be able to edit a
+version's content in place, it will need to make a real, deliberate
+decision about what that means for the versioning model (a new version
+per edit? a genuinely separate "draft" concept distinct from a
+"version"?) — not something this task pre-empts or guesses at.
+
+**Decision:** `generate_process_draft`'s return type changed from the
+bare `ai::ProcessDraft` (TASK-017) to the full persisted `ProcessVersion`
+(id + timestamp + content); a new `get_latest_process_version` command
+was added and wired into `ProcessDraftSection`'s initial load.
+**Reason:** TASK-017's UI always started blank on every page visit,
+even after a real generation, because nothing persisted or reloaded
+it — technically correct for TASK-017 (explicitly ephemeral, TASK-018's
+job to fix) but would have made TASK-018's own persistence invisible to
+a user if left as-is: the data would survive in SQLite, but the UI would
+never show it without clicking Generate again. Loading and displaying
+the latest version on mount is the minimal change that actually makes
+"this Process's AI draft survives leaving and returning to the page"
+true in practice, not just true in the database.
+**Consequence:** `get_latest_by_process` (repository) went from a
+speculative "TASK-019 will probably want this" method to one this task
+itself actually calls — better than leaving it unused with an
+`#[allow(dead_code)]` annotation until some future task got around to
+needing it.
+
+**Decision:** verified the DoD ("generating twice produces two
+retrievable versions, neither overwriting the other") against the real
+running app and the real on-disk database, not just tests against
+fakes/temp directories.
+**Reason:** by this point in the project, "the tests pass" has
+repeatedly turned out to be necessary but not sufficient — the UI-fixes
+session's own history (§29/§30) is the standing reminder of that. A
+persistence guarantee is exactly the kind of claim worth the strongest
+available verification: it's cheap to write a test that looks like it
+proves the right thing while actually testing a fake's behavior instead
+of the real database's.
+**Consequence:** clicked "Generate" for real in the freshly built app,
+confirmed the result, then fully quit and relaunched the application —
+the exact same version reappeared automatically, proving genuine SQLite
+persistence across a real process restart, not an in-memory artifact.
+Then clicked "Regenerate" again and, via a temporary standalone example
+(deleted after use) that opened the real `golive.db` file directly with
+its own fresh `rusqlite::Connection` — bypassing every layer of this
+app's own code, including the repository under test — confirmed the
+`process_versions` table held two rows for that Process, distinct ids,
+distinct timestamps, distinct real content. This is the strongest
+verification standard used in this project to date: an independent read
+of the actual file the shipped application writes to, not a test
+against anything the application's own code constructed.

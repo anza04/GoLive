@@ -1,4 +1,5 @@
 mod active_process;
+mod ai;
 mod commands;
 mod credentials;
 mod db;
@@ -7,7 +8,6 @@ mod hotkey;
 mod media;
 mod models;
 mod native;
-mod openai;
 mod recording;
 mod repositories;
 mod services;
@@ -166,6 +166,10 @@ pub fn run() {
             commands::settings::has_api_key,
             commands::settings::clear_api_key,
             commands::settings::test_api_key_connection,
+            commands::ai::generate_process_draft,
+            commands::ai::list_process_versions,
+            commands::ai::get_process_version,
+            commands::ai::get_latest_process_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

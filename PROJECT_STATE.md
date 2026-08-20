@@ -5,13 +5,15 @@ GoLive
 
 Current milestone:
 M2 — AI Structuring (see roadmap.md; M1 — Live Capture completed at
-TASK-015 — every capture modality the product promises now works.
-TASK-016, M2's first step, is now done too — see below)
+TASK-015. TASK-016, TASK-017, and TASK-018, M2's first three steps, are
+all done and fully verified — including a real successful generation
+against the live OpenAI API and real cross-restart SQLite persistence —
+see below)
 
 Completed:
 TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007,
 TASK-008, TASK-009, TASK-010, TASK-011, TASK-012, TASK-013, TASK-014,
-TASK-015, TASK-016
+TASK-015, TASK-016, TASK-017, TASK-018
 
 ## Current implementation
 
@@ -718,10 +720,11 @@ TASK-015, TASK-016
     (non-empty, ≤2000 chars) before delegating; `test_connection` is
     the only method that ever reads the key's plaintext back out, and
     only to hand it straight to one outbound call
-  - `openai::test_api_key` — a single standalone `reqwest::blocking`
+  - `ai::openai::test_api_key` — a single standalone `reqwest::blocking`
     call to OpenAI's `/v1/models` endpoint; deliberately **not** the
-    `AiService` abstraction (docs/architecture.md §8) — that's
-    TASK-017
+    `AiService` abstraction (docs/architecture.md §8) at the time this
+    was written — TASK-017 (below) built that abstraction and moved
+    this function alongside it (`ai::openai`, was a top-level `openai.rs`)
   - `commands::settings`: `save_api_key`, `has_api_key`, `clear_api_key`,
     `test_api_key_connection` — thin wrappers, same pattern as every
     other `commands::*` module; no new Tauri capability needed (native
@@ -733,6 +736,65 @@ TASK-015, TASK-016
     saved" (never the key) plus Test connection/Clear, with inline
     success/rejection/network-failure feedback. `services/settings.ts`
     is the usual thin `invoke()` wrapper layer
+- **AI service abstraction and process-generation pipeline (TASK-017)**
+  — M2's second step (see docs/architecture.md §32, DECISIONS.md for
+  the full reasoning):
+  - `ai::AiService` trait + `ai::openai::OpenAiService` — the real
+    §8 occupant; nothing above the trait references OpenAI-specific
+    types. `ai::ProcessDraft { summary, steps }` / `ProcessDraftStep
+    { title, description, capture_ids }` — deliberately minimal,
+    TASK-018's call whether it needs to grow
+  - `services::process_draft::ProcessDraftService` — reads a Process's
+    identity, its Captures' metadata, and screenshot bytes (`MediaStorage`),
+    sorts captures chronologically (`created_at` ascending — the list
+    repository's own `updated_at DESC` order is wrong for this),
+    assembles the AI request, enforces "at least 1, at most 60
+    (defensive cap)" captures and a saved API key
+  - The real OpenAI call: Chat Completions
+    (`POST /v1/chat/completions`, not the newer Responses API — a
+    deliberate lower-risk choice, see DECISIONS.md), vision images as
+    base64 `image_url` data URIs, strict-mode JSON-schema structured
+    output. Captures are referenced by a 1-based number the prompt
+    itself assigns, not by real UUID (fewer model transcription
+    errors); `finalize_draft` maps numbers back to real capture ids
+    afterward, dropping any the model hallucinated out of range
+  - `AppError` gained `Ai(String)` (the call completed but the result
+    wasn't usable) distinct from `Network(String)` (the call itself
+    failed); a shared `describe_openai_error` helper (used by both this
+    and TASK-016's `test_api_key`) gives `insufficient_quota` its own
+    specific, actionable message rather than a generic one
+  - One command, `generate_process_draft`; `ProcessDraftSection`
+    (`features/projects/components/`) replaces what used to be a
+    disabled "AI analysis" placeholder in `ProcessDetail` with a real
+    Generate/Regenerate button and a plain read-only summary+steps view
+    — no editing yet (TASK-019); persistence added by TASK-018 below
+- **Structured process content domain and versioning (TASK-018)** — M2's
+  third step (see docs/architecture.md §33, DECISIONS.md for the full
+  reasoning):
+  - `models::process_version::ProcessVersion { id, process_id,
+    content: ai::ProcessDraft, created_at }` — 1:N with Process,
+    `ON DELETE CASCADE`, persisted via `migrations/0005_process_versions.sql`
+    (the first migration since `0004_captures.sql`). `content` is a JSON
+    blob, not normalized — nothing needs field-level queries yet
+    (TASK-019's call). No `updated_at` and no `update` repository
+    method at all — a ProcessVersion is genuinely immutable/append-only;
+    regenerating always `INSERT`s a new row, structurally never
+    overwrites one
+  - `repositories::process_version::ProcessVersionRepository`:
+    `create`, `list_by_process` (`created_at DESC`), `get`,
+    `get_latest_by_process` (a dedicated "just the newest one" query,
+    not `list_by_process(...).first()`, since content can be sizable)
+  - `services::process_draft::ProcessDraftService::generate` now
+    persists its result before returning it — return type changed from
+    the bare `ai::ProcessDraft` to the full `ProcessVersion`. New
+    `list_versions`/`get_version`/`get_latest_version` methods
+  - Three commands: `generate_process_draft` (updated return type),
+    `list_process_versions`, `get_process_version`,
+    `get_latest_process_version`
+  - `ProcessDraftSection` now loads and shows the latest saved version
+    on mount (`get_latest_process_version`) instead of always starting
+    blank — makes the persistence actually visible to a user between
+    visits, not just present in the database
 
 ## Architecture conventions established (TASK-002)
 
@@ -1602,6 +1664,66 @@ verified for real above; only "does a valid key actually get a 2xx"
 remains unconfirmed. A developer with a real OpenAI API key should do
 that one check.
 
+**TASK-017 validation:** the user then added a real OpenAI API key and
+confirmed "test connection" succeeded, closing the gap above. `cargo
+check`/`cargo test` (173 passed — 14 new, 3 ignored unchanged) and
+`tsc --noEmit` clean.
+
+The core risk this task actually carried — "is the request/response
+shape against the real OpenAI API correct" — was verified against the
+real API, not left to documentation: a temporary native example
+(deleted after use, same convention as TASK-013's smoke tests) called
+`ai::openai::OpenAiService` directly with the user's real saved key.
+Result: a real `429 insufficient_quota` — the user's OpenAI account has
+no billing configured. This is genuinely informative, not just a
+blocked test: OpenAI validates a request's structure (model, schema,
+message content) *before* the quota check, so getting this specific
+error rather than a `400` means the request reached real processing —
+strong evidence the request shape is correct. The same exact error then
+reappeared when the real "Generate" button was clicked in the actual
+running app (via the Windows UI Automation technique from the TASK-016
+verification above), confirming the whole pipeline — React → Tauri →
+command → service → real Capture/Process data → real credential-store
+key read → real OpenAI call → real error → back to the UI — works end
+to end for real.
+
+**Update — the user added billing and asked for re-verification; now
+fully confirmed.** The temporary example was recreated, run again, and
+deleted (same convention): a real `POST /v1/chat/completions` call
+returned a genuine 200 with schema-conformant JSON — three note
+Captures in, three correctly-ordered steps out, each `capture_ids`
+correctly pointing at the one capture it came from.
+`finalize_draft`'s happy-path parsing, previously unverified with a
+live response, worked correctly. The identical check was then repeated
+through the real running app: clicked the real "Regenerate" button on a
+real Process, and a genuine AI-generated summary and step list — built
+from that Process's real data — rendered correctly in
+`ProcessDraftSection`. No verification gap remains for TASK-017.
+
+**TASK-018 validation:** `cargo check`/`cargo test` (192 passed — 19
+new, 3 ignored unchanged) and `tsc --noEmit` clean. Repository tests
+cover the DoD literally
+(`generating_twice_produces_two_retrievable_versions_neither_overwriting_the_other`),
+plus cascade-delete and reopening-the-database survival. Service tests
+cover the same invariant against a real in-memory fake (not a
+single-slot stub, so it can actually accumulate multiple rows and be
+inspected afterward). Two `db::tests` pin the new migration's table/
+index/foreign-key shape.
+
+Beyond the automated tests: the DoD was verified against the real
+running app and the real on-disk database, not just fakes. Clicked
+"Generate" for real in the freshly built app, confirmed the result,
+then **fully quit and relaunched the application** — the exact same
+version reappeared automatically on the Process's next load, proving
+genuine SQLite persistence across a real process restart. Then clicked
+"Regenerate" again and, via a temporary standalone example (deleted
+after use) that opened the real `golive.db` file directly with its own
+independent `rusqlite::Connection` — bypassing every layer of this
+app's own code, including the repository under test — confirmed the
+`process_versions` table held two rows for that Process, distinct ids,
+distinct timestamps, distinct real content, neither overwriting the
+other. No verification gap remains for TASK-018.
+
 ## Not implemented yet
 
 - Note capture media (Note Captures other than quick markers remain
@@ -1681,21 +1803,37 @@ that one check.
   pass caught it; treat any further UI-fix claim from this project as
   wanting the same real-harness/real-screenshot verification standard
   the second pass used, not just code review, before it's trusted
-- "Test connection" success path: verified for real up through "a
-  non-2xx OpenAI response is correctly turned into a safe error
-  message" (a genuine rejected-key round trip was exercised against the
-  real API — see the TASK-016 validation entry above), but never with a
-  genuine, working OpenAI API key, since this environment has none. A
-  developer with a real key should do that one check before relying on
-  it in a real engagement.
-- AI integration reliability (structured/schema-constrained output) —
-  still ahead, TASK-017
+- ~~"Test connection" success path: unverified with a real key~~ —
+  resolved. The user added a real OpenAI API key and confirmed "test
+  connection" succeeds against it.
+- ~~Process draft generation success path: unverified with a real
+  key~~ — resolved. The user added billing to the OpenAI account behind
+  the saved key; a real generation was then confirmed both via a
+  temporary native example (a genuine schema-conformant 200 response,
+  correct capture-id mapping) and by clicking the real "Regenerate"
+  button in the running app (see docs/architecture.md §32). The model's
+  real output quality on this one sample looked sensible, but broader
+  quality/reliability across varied real Processes is still an open
+  question (see the next risk item below) — this entry is specifically
+  about the *pipeline* working, which it now demonstrably does.
+- AI output quality/reliability across varied real Processes: only
+  exercised so far on small examples (a 3-capture synthetic one, and one
+  real Process with a single capture) — a real consulting session's
+  captures (dozens of screenshots, messier titles/descriptions,
+  ambiguous ordering) haven't been tried. Revisit once real usage data
+  exists; nothing to fix yet, just an unknown
+- Unbounded version growth: TASK-018 deliberately left
+  deleting/pruning old versions out of scope (per roadmap.md — "not
+  required for MVP"). A Process regenerated very many times will
+  accumulate that many rows/JSON blobs indefinitely; not a problem yet,
+  worth revisiting if it ever becomes one
 - Word document generation quality for a consulting-grade deliverable
+  (M3, still ahead)
 
 ## Next task
 
-TASK-017 (see roadmap.md) — AI service abstraction and raw
-process-generation pipeline: an `AiService` trait + OpenAI
-implementation (docs/architecture.md §8), one command that gathers a
-Process's Captures and sends them to OpenAI, and a minimal read-only
-view of the result. Depends on TASK-016's stored key (done).
+TASK-019 (see roadmap.md) — Process editor UI: let a user actually
+read, edit, save, switch between versions of, and trigger regeneration
+for a Process's structured content — the "editable" half of the
+product's "structured, editable business process" promise. Depends on
+TASK-018 (done).
