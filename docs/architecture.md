@@ -3282,10 +3282,146 @@ fix read back via `ValuePattern`, the Documentation tab's new tooltip
 read back via `AutomationElement.Current.HelpText`, and the Overview
 tile's removal confirmed by its absence on a freshly created project.
 
+## 37. Post-MVP fixes: single-instance guard, widget click-activation, LaTeX export (TASK-022)
+
+**CURRENT.** Three independently-scoped items raised in a post-MVP
+review: a real cross-process risk, a real click-responsiveness bug, and
+a genuine new export format — see roadmap.md's "Post-MVP" section and
+DECISIONS.md for the full reasoning behind each.
+
+**Single-instance guard.** `tauri-plugin-single-instance` (official
+first-party plugin) registered as the *first* plugin in `lib.rs`'s
+builder chain, per its own documented requirement. A second launch
+attempt never starts a second process — its callback runs in the
+original, already-running instance instead, and just shows/focuses the
+main window (the same `show()`/`set_focus()` pair `tray::build`'s "Open
+GoLive" item already uses). Investigated as a candidate cause of the
+capture-persistence report that prompted this task (two instances
+running independent startup media-reconcile sweeps against the same
+`golive.db` is exactly the shape of race that could delete a
+still-referenced file) — not confirmed as the actual cause, but
+structurally eliminated either way.
+
+**Widget click-activation fix.** The widget's collapsed dot needed two
+clicks to open whenever it didn't already have OS input focus — the
+common case, since the widget's entire purpose is to be reachable while
+focus is on some other application. Root cause, confirmed by direct
+reproduction: a click on any window that isn't the current OS focus
+target first activates that window; Windows does not also deliver that
+click event to the control under the cursor unless the window carries
+the `WS_EX_NOACTIVATE` extended style. `tauri.conf.json`'s `"focus":
+false` only governs focus at window *creation*, not this. Fixed with a
+direct Win32 call — `SetWindowLongPtrW`/`GetWindowLongPtrW` on
+`GWL_EXSTYLE`, adding `WS_EX_NOACTIVATE` — on the widget's real HWND in
+`.setup()`, the same "reach past Tauri's declarative config to the raw
+Win32 layer" pattern the widget's transparency fix (§30) already
+established. Requires the `windows` crate as a direct dependency,
+pinned to the exact `0.61` version Tauri itself depends on internally —
+`WebviewWindow::hwnd()` returns a `windows::Win32::Foundation::HWND`,
+and `windows` crate versions are not type-compatible with each other
+across even minor version bumps, so a mismatched version would fail to
+compile against Tauri's own returned type.
+
+**LaTeX export.** `services::latex_export::LatexExportService` — same
+shape as `DocxExportService` (`export(version_id, target_path)`, same
+four constructor dependencies, same validation discipline), kept as an
+independent sibling rather than unified behind a shared trait (see
+DECISIONS.md: the two formats' *output* shapes differ intrinsically —
+LaTeX has no way to embed an image inside a single self-contained
+`.tex` file the way a `.docx`'s ZIP container embeds a PNG inside
+itself). Produces a `.zip` bundle instead: `document.tex` at its root,
+`images/<capture-id>.png` per screenshot a step cites, and a short
+`README.txt` explaining how to compile it (any LaTeX distribution,
+e.g. `pdflatex document.tex`). Every piece of AI-generated/user-edited
+text reaching the `.tex` output is escaped for LaTeX's special
+characters (`\ { } $ & # % _ ~ ^`) by a dedicated `escape_latex`
+function, unit-tested against all of them plus the multi-line case —
+this text is never trustworthy LaTeX input by construction (an LLM or
+free-form typing can produce any of those characters at any point, and
+unescaped they either break compilation or silently corrupt the
+document, e.g. `%` starting a LaTeX comment mid-line).
+
+One new command, `export_process_version_to_latex`; a second "Export to
+LaTeX" button next to "Export to Word" in `ProcessDraftSection` — the
+user picks a format by which button they click, both going through the
+identical Save As dialog pattern (`services/export.ts`'s two
+`exportProcessVersionTo*` functions, sharing only a `suggestedFileName`
+helper now generalized to take an extension). Both export buttons share
+one `exportingFormat` busy flag (`"docx" | "latex" | null`), the same
+"one shared flag disables every action in the group" convention the
+widget's Capture/Marker buttons already use, so the two formats can't
+be exported concurrently against the same version.
+
+**Testing.** `cargo test` (217 passed — 7 new, 3 ignored unchanged) and
+`npx tsc --noEmit` clean; a full `npm run tauri build` produced a real
+`golive.exe`/NSIS installer. `services::latex_export`'s tests mirror
+`services::docx_export`'s (missing version, bad extension, missing
+parent directory, a real readable `.zip` containing `document.tex` and
+`README.txt`, a cited screenshot embedded while a non-screenshot/
+nonexistent capture id is silently skipped) plus dedicated coverage of
+`escape_latex`/`escape_latex_multiline` against every special character.
+
+Beyond the automated tests, verified against the real running app:
+launching a second `golive.exe` while a first is already running
+brought the first instance's window forward instead of starting a
+second process (confirmed via `tasklist` showing only one `golive.exe`
+throughout, and `GetForegroundWindow` reading back the existing main
+window immediately after the second launch attempt).
+
+The widget click fix was confirmed two ways. First, directly at the
+Win32 level: `GetWindowLong(hwnd, GWL_EXSTYLE)` on the widget's real
+HWND, read back from the freshly built binary, has the
+`WS_EX_NOACTIVATE` bit set. Second, behaviorally: with neither GoLive
+window holding OS focus (confirmed via `GetForegroundWindow` reading
+back an unrelated third-party window beforehand), a single
+`InvokePattern.Invoke()` click on the widget's collapsed dot expanded
+it to the full panel on the very first attempt — *and* `GetForegroundWindow`
+read back that same unrelated window again immediately afterward,
+proving the widget never took OS focus at all, exactly the behavior
+`WS_EX_NOACTIVATE` is supposed to produce. (This session's earlier,
+pre-fix reproduction — the finding that prompted this fix — used the
+opposite setup, main window explicitly focused beforehand, and showed a
+single click activating the widget *without* registering as a button
+press, requiring a second click; that reproduction is what's no longer
+possible now.)
+
+LaTeX export was verified by exporting a real generated draft through
+the real native Save As dialog to a real `.zip`, independently re-opened
+and inspected: a valid ZIP archive containing a `document.tex` with the
+expected title/summary/step text and correct LaTeX escaping, plus the
+`README.txt`. (This particular draft's one step cited a Note capture,
+not a screenshot, so it didn't exercise the `images/` embedding path in
+this specific live run — that path is covered separately by
+`services::latex_export`'s own automated test, which uses the identical
+`load_cited_screenshots` logic `DocxExportService`'s equally-covered,
+independently live-verified image embedding already exercises.) **One
+honest gap:** this stops short of an actual LaTeX compile — no LaTeX
+distribution is installed in this environment, and installing one (or
+sending the generated document to an online compiler, which was ruled
+out as this task's call to make unilaterally with the user's own
+captured content) wasn't assumed to be wanted without asking. Closeable
+on request — see DECISIONS.md.
+
+**A new, separate finding surfaced incidentally while testing the
+single-instance guard**, not something this task set out to look for:
+once, right after a launch, the Projects list briefly failed to load
+("Couldn't load projects" / the generic non-`AppError` fallback
+message), self-resolving on Retry. A clean cold start immediately
+afterward loaded correctly on the first try, so this wasn't reliably
+reproduced and is not claimed as fixed, or even as confirmed-diagnosed.
+It's recorded here as a plausible lead for the original, still-open
+"captures sometimes don't show media after reopening" report: a
+frontend `invoke()` call racing ahead of `.setup()` finishing
+`app.manage(...)` would surface as exactly this generic, non-`AppError`
+failure shape, and the same race hitting `list_captures`/
+`get_capture_media` instead of `list_projects` would look identical to
+that original report. See PROJECT_STATE.md's known-risks list.
+
 ## Status
 
-**MVP complete.** Reflects the state after **TASK-001 through
-TASK-021** — every milestone in roadmap.md is done:
+**MVP complete, plus one Post-MVP task.** Reflects the state after
+**TASK-001 through TASK-022** — every milestone in roadmap.md is done,
+plus a small round of post-MVP fixes/additions (§37):
 
 **M1 — Live Capture** — every capture modality the product description
 promises (screenshot, recording, audio, quick markers) exists and
@@ -3323,6 +3459,12 @@ unassisted manual pass through the entire consultant workflow, in one
 continuous session, confirmed the whole product works together, not
 just each piece in isolation; the two real documentation-accuracy
 issues it found were fixed (§36).
+
+**Post-MVP (TASK-022)** — a second `golive.exe` can no longer run
+alongside a first one; the floating widget's collapsed dot responds to
+its very first click even without prior OS focus; a Process's
+structured content can now export as a LaTeX source bundle as well as
+Word, the user choosing which at export time (§37).
 
 See [PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative
 current implementation status, including known limitations and

@@ -23,6 +23,7 @@
 | TASK-019 | Process editor UI | DONE |
 | TASK-020 | Word (.docx) functional specification export | DONE |
 | TASK-021 | MVP end-to-end hardening and documentation | DONE |
+| TASK-022 | Post-MVP: single-instance guard, widget click-activation fix, LaTeX export | DONE |
 
 MVP complete — see [roadmap.md](roadmap.md) for milestone grouping and
 [PROJECT_STATE.md](PROJECT_STATE.md) for the authoritative current

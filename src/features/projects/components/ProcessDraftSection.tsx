@@ -7,7 +7,7 @@ import {
   type ProcessDraftStep,
   type ProcessVersion,
 } from "../../../services/ai";
-import { exportProcessVersionToDocx } from "../../../services/export";
+import { exportProcessVersionToDocx, exportProcessVersionToLatex } from "../../../services/export";
 import { getErrorMessage } from "../../../utils/errorMessage";
 import { formatDate } from "../../../utils/formatDate";
 
@@ -42,7 +42,12 @@ export function ProcessDraftSection({ processId, processName }: ProcessDraftSect
   const [saveError, setSaveError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
-  const [exporting, setExporting] = useState(false);
+  // Which format is currently exporting, if any — `null` means neither
+  // button is busy. A single shared flag (not one per format) so the two
+  // export actions can't run concurrently against the same version, the
+  // same "one shared busy flag disables every action in the group"
+  // convention the widget's Capture/Marker buttons already use.
+  const [exportingFormat, setExportingFormat] = useState<"docx" | "latex" | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportedPath, setExportedPath] = useState<string | null>(null);
 
@@ -131,22 +136,26 @@ export function ProcessDraftSection({ processId, processName }: ProcessDraftSect
 
   // Exports the currently selected version's *persisted* content — not
   // the live edit buffers — so a dirty, unsaved edit never silently
-  // exports something the user hasn't actually saved yet (the Export
-  // button is disabled while `dirty` is true; see the button below).
-  async function handleExport() {
-    if (!selectedId || exporting) return;
-    setExporting(true);
+  // exports something the user hasn't actually saved yet (both export
+  // buttons are disabled while `dirty` is true; see the buttons below).
+  // `format` picks which of the two sibling export commands/services
+  // runs — everything else about the flow (Save As dialog, success/
+  // cancel/error handling) is identical between them.
+  async function handleExport(format: "docx" | "latex") {
+    if (!selectedId || exportingFormat) return;
+    setExportingFormat(format);
     setExportError(null);
     setExportedPath(null);
     try {
-      const path = await exportProcessVersionToDocx(selectedId, processName);
+      const exportFn = format === "docx" ? exportProcessVersionToDocx : exportProcessVersionToLatex;
+      const path = await exportFn(selectedId, processName);
       if (path) setExportedPath(path);
       // `path` is null when the user cancelled the Save As dialog —
       // not an error, nothing to show.
     } catch (error) {
       setExportError(getErrorMessage(error));
     } finally {
-      setExporting(false);
+      setExportingFormat(null);
     }
   }
 
@@ -292,11 +301,20 @@ export function ProcessDraftSection({ processId, processName }: ProcessDraftSect
             <button
               type="button"
               className="button"
-              onClick={() => void handleExport()}
-              disabled={dirty || exporting}
+              onClick={() => void handleExport("docx")}
+              disabled={dirty || exportingFormat !== null}
               title={dirty ? "Save your edits before exporting." : undefined}
             >
-              {exporting ? "Exporting…" : "Export to Word"}
+              {exportingFormat === "docx" ? "Exporting…" : "Export to Word"}
+            </button>
+            <button
+              type="button"
+              className="button"
+              onClick={() => void handleExport("latex")}
+              disabled={dirty || exportingFormat !== null}
+              title={dirty ? "Save your edits before exporting." : undefined}
+            >
+              {exportingFormat === "latex" ? "Exporting…" : "Export to LaTeX"}
             </button>
           </div>
 

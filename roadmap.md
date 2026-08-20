@@ -437,3 +437,57 @@ after TASK-021:
 - Recording pause/resume.
 - Multi-user / cloud sync of any kind.
 - Any AI provider other than OpenAI.
+
+---
+
+## Post-MVP
+
+Work that continues the same `TASK-0NN` sequence after the MVP
+(TASK-001–021) was declared complete, each scoped and authorized
+individually the same way every task above was.
+
+### TASK-022 ✅ DONE — Single-instance guard, widget click-activation fix, LaTeX export
+
+**Depends on:** the completed MVP (TASK-001–021).
+**Goal:** three independently-scoped items raised after a hands-on MVP
+review: (1) prevent a second `golive.exe` from ever running alongside a
+first one — a real, previously-unguarded cross-process risk against the
+same `golive.db`; (2) fix the floating widget's collapsed dot needing
+two clicks to respond whenever it doesn't already have OS focus (the
+common case); (3) let a user export a Process's structured content as a
+LaTeX source bundle, as an alternative to Word, choosing which at export
+time.
+
+**In scope:**
+- `tauri-plugin-single-instance` (official first-party plugin),
+  registered first in the builder chain; a second launch attempt brings
+  the already-running instance's main window forward instead of running
+  a second process.
+- `WS_EX_NOACTIVATE` set on the widget's real HWND at startup (a Win32
+  call via the `windows` crate, matching Tauri's own pinned version so
+  the `HWND` type returned by `WebviewWindow::hwnd()` lines up) — the
+  same "reach past Tauri's declarative config to the raw Win32 layer"
+  pattern the widget's transparency fix already used.
+- `LatexExportService` (`services/latex_export.rs`): same
+  `export(version_id, target_path)` shape as `DocxExportService`, same
+  source data (a `ProcessVersion` and its cited screenshot Captures),
+  writing a `.zip` (`document.tex`, `images/<capture-id>.png` per
+  embedded screenshot, a short `README.txt`) instead of one `.docx`
+  file — LaTeX has no way to embed an image inline in a single
+  self-contained file the way `.docx` does. One new command,
+  `export_process_version_to_latex`, and a second "Export to LaTeX"
+  button next to "Export to Word" in the Process draft section — the
+  user picks the format by which button they click, both going through
+  the same native Save As dialog pattern.
+
+**Out of scope:** a shared export-service abstraction between the two
+formats (kept independent — see DECISIONS.md); PDF compilation of the
+LaTeX output within GoLive itself (the user compiles it themselves, per
+the bundled `README.txt`); any change to the Word export's own output.
+
+**Definition of done:** launching `golive.exe` while it's already
+running brings the existing window forward instead of starting a second
+process; clicking the widget's collapsed dot opens the panel on the
+first click even when the widget didn't already have focus; exporting a
+Process's content as LaTeX produces a real `.zip` whose `document.tex`
+compiles to a PDF containing the expected structure and images.

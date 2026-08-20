@@ -2468,3 +2468,151 @@ the full manual workflow pass described above, which used the same
 already-built binary. `cargo test` (210/210, unchanged — no Rust code
 was touched this task) and `npx tsc --noEmit` both re-confirmed clean
 after the copy/JSX edits.
+
+## TASK-022 — Single-instance guard, widget click-activation fix, LaTeX export
+
+**Decision:** `tauri-plugin-single-instance` (Tauri's own official
+plugin), registered as the very first plugin in the builder chain, over
+hand-rolling a lock file or named mutex.
+**Reason:** matches this project's consistent preference for an
+official first-party plugin over a hand-rolled equivalent whenever one
+exists and fits (see `tauri-plugin-global-shortcut`, `tauri-plugin-
+dialog`) — the plugin already handles the actual cross-process
+coordination correctly (a named OS mutex on Windows under the hood) and
+the "callback runs in the *original* instance, second process exits
+immediately" behavior is exactly what's needed, with nothing GoLive-
+specific to get subtly wrong by reimplementing it.
+**Consequence:** one new dependency; registered before every other
+`.plugin(...)` call and before `.setup()`, per the plugin's own
+documented requirement. The callback shows and focuses the main
+window — the same `show()`/`set_focus()` pair `tray::build`'s "Open
+GoLive" menu item already uses — so a second launch attempt (e.g.
+double-clicking the desktop shortcut again) reads as "bring GoLive to
+the front," not "silently do nothing."
+
+**Decision:** investigated as a candidate root cause for the
+intermittently-reported "captures sometimes don't show media after
+reopening" issue, but not claimed as a confirmed fix for it.
+**Reason:** two independent `r2d2`/SQLite pools against the same
+`golive.db`, each running its own independent startup media-reconcile
+sweep (`CaptureService::reconcile_media`, which deletes any media file
+whose capture id isn't in *that pool's own* read of the database) is
+exactly the shape of cross-process race that could delete a capture's
+media the reconciling instance's own read hadn't yet seen committed by
+the other instance. This was never reproduced directly (deliberate
+double-launching real captures in a tight race window is hard to force
+reliably), so it's recorded here as a plausible contributing cause this
+fix closes off, not a diagnosed-and-confirmed root cause — the original
+report (see the conversation this decision comes from) remains open
+pending more specific reproduction detail if it recurs after this fix.
+**Consequence:** whether or not it was the actual cause of the original
+report, running two instances is now structurally impossible, so it's
+eliminated as a possibility either way.
+
+**Decision:** the widget's click-activation problem is fixed by setting
+`WS_EX_NOACTIVATE` on its real HWND via a direct Win32 call (the
+`windows` crate, pinned to the exact `0.61` version Tauri itself
+depends on so `WebviewWindow::hwnd()`'s returned `HWND` type and the
+Win32 functions called on it agree), not by changing
+`tauri.conf.json`'s `"focus": false` or anything at the Tauri
+declarative-config layer.
+**Reason:** `"focus": false` only controls whether the window steals
+focus at *creation*/show time — it does not set the persistent extended
+window style that also stops *later* clicks from being consumed by
+window activation, which is the actual mechanism behind "clicking it
+doesn't immediately open the dialog": a click on a window that isn't
+the current OS focus target first activates that window, and Windows
+does not also deliver that same click event to whatever control was
+under the cursor unless the window is marked `WS_EX_NOACTIVATE`.
+Reproduced directly this session: with the main window holding real OS
+focus (the ordinary case — the widget's whole purpose is being usable
+while something *else* has focus), a single click on the widget's
+collapsed dot reliably activated the widget window without the click
+reaching the button underneath it.
+**Consequence:** same "reach past Tauri's declarative config to the raw
+Win32 layer, on the real HWND, inside `.setup()`" pattern the widget's
+transparency fix (§30/DECISIONS.md) already used — a second instance of
+that same fix shape for a second layer Tauri's own config doesn't fully
+reach. The widget now never needs an activation step before a click
+registers, for any click, not just the first one after the app starts.
+
+**Decision:** LaTeX export is a `.zip` bundle (`document.tex` +
+`images/` + `README.txt`), not a single `.tex` file, and is implemented
+as an independent `LatexExportService` rather than unifying it with
+`DocxExportService` behind a shared export trait.
+**Reason:** LaTeX's `\includegraphics` only ever references an image
+file sitting next to the `.tex` source — there is no way to embed image
+bytes inside the `.tex` text itself the way a `.docx`'s ZIP container
+embeds a PNG inside itself. A bundle is the only way to keep "with
+embedded screenshots referenced by the relevant steps" (the same
+requirement TASK-020 satisfied for Word) true for LaTeX too, so the
+single-file-vs-bundle difference is intrinsic to the format, not a
+design choice this task could avoid. Given that intrinsic difference,
+the two services' `export()` methods end up sharing almost nothing
+beyond their four constructor dependencies and a four-line
+"gather cited screenshots" helper (duplicated rather than shared — see
+the source comment in `latex_export.rs`) — a shared trait would mostly
+be indirection around two genuinely different output shapes, not
+meaningfully shared logic, going against this project's existing
+"don't introduce an abstraction until duplication actually hurts"
+practice (the same reasoning `media::MediaStorage` gave for keeping
+PNG/MP4 as separate methods rather than one generic-media-type method).
+**Consequence:** two sibling services, two sibling commands
+(`export_process_version_to_docx`/`export_process_version_to_latex`),
+two sibling buttons in the UI ("Export to Word"/"Export to LaTeX") —
+the user picks a format by which button they click, both going through
+the identical Save As dialog pattern (`services/export.ts`'s
+`exportProcessVersionToDocx`/`exportProcessVersionToLatex`, which now
+share only a `suggestedFileName` helper generalized to take an
+extension). A future third format would very plausibly justify
+revisiting this as a shared trait; two formats, with this much
+intrinsic difference between them, does not yet.
+
+**Decision:** every piece of AI-generated/user-edited text reaching the
+`.tex` output (title, description, summary, step titles/descriptions)
+is escaped for LaTeX's special characters (`\ { } $ & # % _ ~ ^`) before
+being written, with a dedicated `escape_latex` function and unit tests
+covering every one of those characters plus the multi-line case.
+**Reason:** this text is never LaTeX-safe by construction — it comes
+from an LLM or free-form user typing, either of which can produce `%`,
+`&`, `_`, `#`, `$`, braces, or a literal backslash at any point. Any one
+of those, unescaped, either breaks LaTeX compilation outright or
+silently changes what the document says (e.g. `%` starts a LaTeX
+comment, silently truncating the rest of a line). This is the same
+"never trust text crossing a format boundary" discipline the app
+already applies elsewhere (SQL uses parameterized queries throughout;
+`AppError`'s `Serialize` impl never lets a raw underlying error string
+reach the frontend), applied to a new boundary this task introduced.
+**Consequence:** a process name or a captured description containing,
+say, a literal `%` or `_` (plausible in real consulting content — file
+paths, percentages, discount codes) renders correctly in the compiled
+PDF instead of corrupting the document or silently dropping text.
+
+**Decision:** verified against the real running app and real generated
+content the same way every export feature in this project has been —
+but **stops short of an actual LaTeX compile**, unlike the Word export's
+verification, which went all the way to opening the real output in real
+Microsoft Word.
+**Reason:** no LaTeX distribution (TeX Live, MiKTeX) is installed in
+this environment, and installing one is a large, slow toolchain
+addition to the *development/verification* machine, not to GoLive
+itself (GoLive never compiles LaTeX — the user does, on their own
+machine, per the bundled `README.txt`) — worth doing only if actually
+wanted, not assumed. Sending the generated `.tex` to an online
+compiler instead was ruled out for the same reason this project never
+sends user content anywhere without it being the point of the feature:
+this document's content is the user's own captured/AI-generated
+business-process data, and shipping it to a third-party service purely
+to self-check formatting isn't this task's call to make unilaterally.
+**Consequence:** what *is* verified: a real click through the real
+running app, the real native Save As dialog, and a real `.zip` landing
+on disk (`services::latex_export`'s own tests independently confirm the
+archive is readable, contains `document.tex`/`README.txt`/the expected
+`images/<id>.png` entries, and that every LaTeX special character is
+escaped). What is not yet independently confirmed: that `document.tex`
+is free of some LaTeX syntax mistake only a real compiler would catch
+(e.g. an unbalanced brace introduced by a future edit to the generator).
+This is the one honest gap in this task's verification — flagged, not
+hidden, and closeable on request by either installing a LaTeX
+distribution here or asking the user to compile one real exported
+bundle themselves and report back.

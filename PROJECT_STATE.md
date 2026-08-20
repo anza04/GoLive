@@ -4,22 +4,21 @@ Project:
 GoLive
 
 Current milestone:
-**MVP complete.** M1 — Live Capture, M2 — AI Structuring, and M3 —
-Export and MVP Completion (see roadmap.md) are all done: TASK-001
-through TASK-021 are all done and fully verified, most recently by one
-full, unassisted manual pass through the entire consultant workflow in
-a single continuous session — create a project, live-capture a process
-via the widget (screenshot, marker, recording with audio), add a note,
-generate the AI structure, edit it, and export a real Word document
-through the native Save As dialog end to end, opened and visually
-confirmed in real Microsoft Word — see below. No task is queued next;
-further work would be a new, separately-scoped task continuing the same
+**MVP complete, plus one Post-MVP task.** M1 — Live Capture, M2 — AI
+Structuring, and M3 — Export and MVP Completion (see roadmap.md) are
+all done: TASK-001 through TASK-021, fully verified, most recently by
+one full, unassisted manual pass through the entire consultant workflow
+in a single continuous session. TASK-022 (Post-MVP) followed a hands-on
+review: a single-instance guard, a widget click-activation fix, and
+LaTeX export alongside Word — see below. No task is queued next; further
+work would be a new, separately-scoped task continuing the same
 `TASK-0NN` sequence, not a reopening of anything above.
 
 Completed:
 TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007,
 TASK-008, TASK-009, TASK-010, TASK-011, TASK-012, TASK-013, TASK-014,
-TASK-015, TASK-016, TASK-017, TASK-018, TASK-019, TASK-020, TASK-021
+TASK-015, TASK-016, TASK-017, TASK-018, TASK-019, TASK-020, TASK-021,
+TASK-022
 
 ## Current implementation
 
@@ -915,6 +914,55 @@ TASK-015, TASK-016, TASK-017, TASK-018, TASK-019, TASK-020, TASK-021
     simply re-confirm no regression; the real verification is the manual
     pass and the two fixes, confirmed against a freshly built, freshly
     launched `golive.exe` via Windows UI Automation
+- **Post-MVP fixes: single-instance guard, widget click-activation,
+  LaTeX export (TASK-022)** — three items from a post-MVP hands-on
+  review (see docs/architecture.md §37, DECISIONS.md for the full
+  reasoning):
+  - New dependency `tauri-plugin-single-instance` (official first-party
+    plugin), registered first in the builder chain. A second
+    `golive.exe` launch never starts a second process — its callback
+    runs in the original instance and shows/focuses its main window
+    instead. Investigated (not confirmed) as a possible contributor to
+    the capture-persistence report that prompted this review: two
+    instances each running their own independent startup media-
+    reconcile sweep against the same `golive.db` is exactly the shape
+    of cross-process race that could delete a still-referenced file;
+    structurally eliminated either way now
+  - Widget click-activation bugfix: clicking the widget's collapsed dot
+    while it didn't already have OS focus (the common case) activated
+    the window without the click reaching the button — standard Win32
+    behavior for a window not marked "don't activate on click," which
+    `tauri.conf.json`'s `"focus": false` does not itself set. Fixed with
+    a direct `SetWindowLongPtrW`/`GWL_EXSTYLE`/`WS_EX_NOACTIVATE` call
+    on the widget's real HWND in `.setup()` — the same "reach past
+    Tauri's config to the raw Win32 layer" pattern the widget's
+    transparency fix already used. New dependency `windows` (pinned to
+    the exact `0.61` version Tauri itself depends on, so `HWND` types
+    agree)
+  - `services::latex_export::LatexExportService` (new) — the LaTeX
+    counterpart to `DocxExportService`, same shape and dependencies, but
+    producing a `.zip` bundle (`document.tex` + `images/<capture-id>.png`
+    per embedded screenshot + a `README.txt`) rather than one `.docx`
+    file, since LaTeX has no way to embed an image inside a single
+    self-contained `.tex` file. Kept as an independent sibling service
+    rather than unified with `DocxExportService` behind a shared trait —
+    the two formats' output shapes differ too intrinsically for a shared
+    abstraction to be more than indirection. Every piece of AI-generated/
+    user-edited text is escaped for LaTeX's special characters
+    (`\ { } $ & # % _ ~ ^`) before reaching the `.tex` output — this text
+    is never trustworthy LaTeX input by construction
+  - One new command, `export_process_version_to_latex`; a second
+    "Export to LaTeX" button next to "Export to Word" in
+    `ProcessDraftSection` — the user picks a format by which button they
+    click. Both buttons share one `exportingFormat` busy flag so the two
+    formats can't export concurrently against the same version
+  - **One honest verification gap:** LaTeX export was verified against
+    the real running app and a real generated `.zip` (valid archive,
+    correct contents, correct escaping) but *not* by an actual LaTeX
+    compile — no LaTeX distribution is installed in this environment,
+    and installing one, or sending the user's generated document to an
+    online compiler, wasn't assumed to be wanted without asking.
+    Closeable on request
 
 ## Architecture conventions established (TASK-002)
 
@@ -1930,6 +1978,50 @@ verification gap remains for TASK-021, or — with this pass explicitly
 exercising every feature built since TASK-001 together — for the MVP
 as a whole.
 
+**TASK-022 validation:** `cargo test` (217/217 — 7 new, 3 ignored
+unchanged), `npx tsc --noEmit`, and a full `npm run tauri build`
+(producing a real, larger — the new `windows` crate dependency added
+real link time — `golive.exe`/NSIS installer) all pass. Verified
+against that freshly built binary:
+- **Single-instance guard:** launched `golive.exe`, then launched it
+  again while the first was still running — `tasklist` showed only one
+  `golive.exe` process throughout, and `GetForegroundWindow` read back
+  the existing main window immediately after the second attempt,
+  confirming the callback brought it forward rather than nothing
+  happening.
+- **Widget click-activation fix:** confirmed two ways. Directly,
+  `GetWindowLong(hwnd, GWL_EXSTYLE)` on the widget's real HWND has the
+  `WS_EX_NOACTIVATE` bit set. Behaviorally, with neither GoLive window
+  holding OS focus, a single click on the collapsed dot expanded it
+  immediately, and `GetForegroundWindow` showed the widget never took
+  OS focus at all — before this fix, the identical single-click
+  sequence (with the main window explicitly focused beforehand) had
+  activated the widget without the click reaching the button, needing a
+  second click.
+- **LaTeX export:** clicked "Export to LaTeX" for real, drove the real
+  native Save As dialog's Save button for real, and confirmed a real
+  `.zip` on disk (independently opened and inspected: a valid archive,
+  `document.tex` with the expected title/summary/step text and correct
+  LaTeX escaping, plus `README.txt`). One honest gap: no actual LaTeX
+  compile was performed (no LaTeX distribution installed in this
+  environment; installing one, or sending the generated document to an
+  online compiler, wasn't assumed to be wanted without asking) — see
+  "Known technical risks" below.
+
+**A new finding, surfaced incidentally while testing the single-
+instance guard, not chased down further this task:** once, immediately
+after a launch, the Projects list briefly failed to load with the
+generic "Something went wrong" fallback message (not an `AppError`
+shape), self-resolving on Retry; a clean cold start right afterward
+loaded correctly on the first try. Not reliably reproduced, so not
+claimed as diagnosed or fixed — recorded as a plausible lead for the
+still-open "captures sometimes don't show media after reopening" report
+(see "Known technical risks"): a frontend `invoke()` racing ahead of
+`.setup()` finishing `app.manage(...)` would produce exactly this
+generic, non-`AppError` failure shape, and the same race hitting
+`list_captures`/`get_capture_media` instead of `list_projects` would
+look identical to that original report.
+
 ## Not implemented yet
 
 - Note capture media (Note Captures other than quick markers remain
@@ -2051,11 +2143,39 @@ task to touch this file should remove it.)
   several full-resolution screenshots hasn't been exercised — no
   pagination/section-break handling exists beyond what Word does
   automatically, and export time/memory for that case is unmeasured
+- **"Captures sometimes don't show media after reopening" — reported by
+  the user, still open.** Extensive investigation (TASK-022 session):
+  code review of `MediaStorage::reconcile`/`CaptureService::
+  reconcile_media` (the startup orphan sweep) found nothing structurally
+  wrong; two consecutive real app restarts with real screenshot and
+  recording data both loaded correctly; media files were confirmed
+  present and correctly sized on disk throughout. A plausible
+  contributing cause — two `golive.exe` instances each running their own
+  independent startup reconcile sweep against the same `golive.db`,
+  racing each other — is now structurally eliminated by TASK-022's
+  single-instance guard, but was never confirmed as the actual cause. A
+  second, different plausible cause surfaced *incidentally* while
+  testing that guard: a one-off "Couldn't load projects" transient
+  startup error, self-resolving on Retry, consistent with a frontend
+  `invoke()` call racing ahead of `.setup()` finishing
+  `app.manage(...)` — the same race hitting `list_captures`/
+  `get_capture_media` instead would look identical to the original
+  report. Neither lead is confirmed; this entry stays open until either
+  reproduces reliably enough to fix, or the user reports it stopped
+  happening. If it recurs, the most useful detail to capture is: was it
+  a screenshot or a recording, roughly how often, and was the app closed
+  via the tray's Quit or force-closed
+- LaTeX export has not been verified with an actual LaTeX compiler (no
+  distribution installed in the development environment) — see
+  DECISIONS.md/docs/architecture.md §37 for the full reasoning;
+  closeable on request
 
 ## Next task
 
 None queued — **the MVP is complete** (TASK-001 through TASK-021, all
-of roadmap.md's M1/M2/M3). Further work is not planned by any existing
+of roadmap.md's M1/M2/M3), plus TASK-022 (Post-MVP: single-instance
+guard, widget click-activation fix, LaTeX export). Further work is not
+planned by any existing
 document; it would start as a new task brief (continuing the same
 `TASK-0NN` sequence) scoped from a genuinely new requirement — e.g. one
 of the "Explicitly deferred beyond this MVP" items roadmap.md already

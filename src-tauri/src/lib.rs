@@ -15,10 +15,36 @@ mod tray;
 
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Single-instance guard (bugfix, TASK-021 follow-up): nothing
+        // previously stopped a second `golive.exe` from launching
+        // alongside a first one — two processes each holding their own
+        // `r2d2`/SQLite pool against the same `golive.db`, and each
+        // running their own independent startup media-reconcile sweep
+        // against a database the *other* instance might be mid-write
+        // to, is exactly the kind of unforced cross-process race that
+        // could explain a capture's media going missing after a
+        // relaunch. Tauri's own first-party plugin; per its documented
+        // usage it must be the very first plugin registered, before
+        // anything else in this chain. When a second launch is
+        // detected, the second process's `main()` never proceeds past
+        // this (see the plugin's own behavior) — this callback runs in
+        // the *first*, already-running instance, and just brings its
+        // main window forward, the same `show()`/`set_focus()` pair
+        // `tray::build`'s "Open GoLive" item already uses — so
+        // double-launching (e.g. clicking the desktop shortcut again)
+        // reads as "bring GoLive to the front", not "silently do
+        // nothing" or "run two copies".
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         // Word (.docx) export (TASK-020): the native Save As dialog the
         // frontend uses to let the user pick where to export. Registered
         // as a top-level plugin (not inside `.setup()`) — the plugin's
@@ -122,6 +148,35 @@ pub fn run() {
                 if let Err(err) = widget_window.set_background_color(Some(tauri::webview::Color(0, 0, 0, 0))) {
                     eprintln!("[golive] failed to set widget webview background color: {err}");
                 }
+
+                // Bugfix: clicking the widget while it doesn't already
+                // have OS input focus — the normal case, since its whole
+                // point is to be reachable while some *other* window is
+                // focused — activated the widget window but never
+                // delivered that click to the button underneath it,
+                // requiring a second click to actually register.
+                // Standard Win32 behavior for any window not marked
+                // "don't activate on click": the first click on it is
+                // consumed by window activation instead of being passed
+                // through. `tauri.conf.json`'s `"focus": false` only
+                // controls whether the window steals focus when it's
+                // first *created*/shown — it does not set the extended
+                // window style that also stops *later* clicks from being
+                // eaten by activation. Setting `WS_EX_NOACTIVATE`
+                // directly on the real HWND (the same "reach past
+                // Tauri's declarative config to the raw Win32 layer"
+                // pattern as the background-color fix just above) makes
+                // every click - even the very first one after the widget
+                // last lost focus - reach the button immediately, since
+                // Windows no longer needs an activation step for this
+                // window at all.
+                match widget_window.hwnd() {
+                    Ok(hwnd) => unsafe {
+                        let current_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, current_ex_style | (WS_EX_NOACTIVATE.0 as isize));
+                    },
+                    Err(err) => eprintln!("[golive] failed to get the widget window's HWND: {err}"),
+                }
             } else {
                 eprintln!("[golive] widget window not found during setup — cannot set its background color");
             }
@@ -180,6 +235,7 @@ pub fn run() {
             commands::ai::get_latest_process_version,
             commands::ai::update_process_version_content,
             commands::export::export_process_version_to_docx,
+            commands::export::export_process_version_to_latex,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

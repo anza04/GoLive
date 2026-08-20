@@ -10,25 +10,29 @@ functional specification.
 
 ## Current status
 
-**MVP complete (TASK-001 through TASK-021).** GoLive implements the full
-workflow its own product description promises: create a **project**,
-document a **process** within it, capture that process live — from
-anywhere in Windows, without switching to GoLive's main window — via a
-global hotkey and a small always-on-top floating widget, in every
-modality the product promises (screenshots, screen recordings with
-optional microphone audio, and one-click markers, plus ordinary typed
-notes from the main window), then turn those captures into a
-structured, AI-generated business process using OpenAI, edit that draft
-by hand, and export the result as a real Word (`.docx`) functional
-specification with embedded screenshots — via a native Save As dialog —
-that opens correctly in Microsoft Word.
+**MVP complete (TASK-001 through TASK-021), plus a Post-MVP round
+(TASK-022).** GoLive implements the full workflow its own product
+description promises: create a **project**, document a **process**
+within it, capture that process live — from anywhere in Windows,
+without switching to GoLive's main window — via a global hotkey and a
+small always-on-top floating widget, in every modality the product
+promises (screenshots, screen recordings with optional microphone
+audio, and one-click markers, plus ordinary typed notes from the main
+window), then turn those captures into a structured, AI-generated
+business process using OpenAI, edit that draft by hand, and export the
+result — as a Word (`.docx`) functional specification with embedded
+screenshots, or as a LaTeX source bundle, the user's choice — via a
+native Save As dialog. The Word export opens correctly in Microsoft
+Word; the LaTeX bundle is a `document.tex` plus its embedded images and
+a short README explaining how to compile it.
 
 Everything persists locally in SQLite (and captured media alongside it
 on disk); deleting a project cascades to its processes, captures, and
 generated drafts. The OpenAI API key lives in the Windows Credential
 Manager only — never in GoLive's own database or any file it writes.
 GoLive keeps running in the system tray when its main window is closed;
-the tray is the one real way to quit.
+the tray is the one real way to quit, and only one instance ever runs
+at a time.
 
 See [PROJECT_STATE.md](PROJECT_STATE.md) for the authoritative current
 state (including known limitations and technical risk), and
