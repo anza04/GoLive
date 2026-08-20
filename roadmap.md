@@ -1,11 +1,16 @@
 # ROADMAP
 
-This document plans every remaining step between the current state
-(TASK-009, done) and a fully working MVP, as defined by
-[README.md](README.md)'s product description: capture screenshots,
-screen video, microphone audio, notes, and markers during a live working
-session; use cloud AI to turn that raw capture into a structured,
-editable business process; export it as a Word functional specification.
+**MVP complete — TASK-001 through TASK-021 are all done.** This document
+originally planned every remaining step from TASK-009 to a fully working
+MVP, as defined by [README.md](README.md)'s product description: capture
+screenshots, screen video, microphone audio, notes, and markers during a
+live working session; use cloud AI to turn that raw capture into a
+structured, editable business process; export it as a Word functional
+specification. It's kept here, unchanged in shape, as the historical
+record of how that plan was scoped and sequenced; PROJECT_STATE.md
+remains the authoritative record of what's actually built. Any future
+work continues the same `TASK-0NN` sequence as a new entry, not by
+reopening anything below.
 
 ## How to use this document
 
@@ -391,7 +396,7 @@ formats, editing the exported file from within GoLive.
 Process produces a `.docx` file that opens correctly in Microsoft Word
 and contains the expected structure and images.
 
-### TASK-021 — MVP end-to-end hardening and documentation
+### TASK-021 ✅ DONE — MVP end-to-end hardening and documentation
 
 **Depends on:** TASK-020 (every prior M1/M2/M3 step, in effect).
 **Goal:** Close the loop: walk the entire consultant workflow start to

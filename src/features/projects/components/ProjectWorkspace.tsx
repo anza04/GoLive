@@ -17,20 +17,18 @@ interface ProjectWorkspaceProps {
 type WorkspaceTabId = "overview" | "processes" | "captures" | "documentation";
 
 // The workspace's navigation structure for what a project contains.
-// "overview" and "processes" (TASK-007) have real content; "documentation"
-// is a reserved, genuinely disabled (not fake-clickable) entry — see
-// docs/architecture.md for how this maps onto real routes later, the
-// same mechanical swap already documented for the top-level Sidebar.
-//
-// "captures" is disabled too, but unlike "documentation" it is NOT a
-// stand-in for a missing feature — Captures have been fully working
-// since TASK-008/009, just one level deeper (inside a selected Process,
-// not here). This tab is reserved for a possible future *project-wide*
-// aggregated captures view, not today's real one, so its `hint`
-// deliberately says something different from the generic "not built
-// yet" every other disabled tab uses — a bugfix (see DECISIONS.md,
-// "hierarchy clarity"): the generic tooltip previously implied the
-// feature didn't exist anywhere in the app at all.
+// "overview" and "processes" (TASK-007) have real content. "captures"
+// and "documentation" are both disabled — but neither is a stand-in for
+// a genuinely missing feature; both are fully working one level deeper,
+// inside a selected Process, not here (Captures since TASK-008/009,
+// Word export since TASK-020's "Export to Word" button in a Process's
+// "Process draft" section). Both `hint`s say so explicitly rather than
+// using the generic "not available yet" every other disabled tab in
+// this app uses — a deliberate bugfix, not an oversight (see
+// DECISIONS.md, "hierarchy clarity"): a generic tooltip here would
+// imply the feature doesn't exist anywhere in the app at all. This tab
+// stays reserved for a possible future *project-wide* aggregated view
+// of either — not today's real, per-Process ones.
 const WORKSPACE_TABS: { id: WorkspaceTabId; label: string; available: boolean; hint?: string }[] = [
   { id: "overview", label: "Overview", available: true },
   { id: "processes", label: "Processes", available: true },
@@ -40,7 +38,12 @@ const WORKSPACE_TABS: { id: WorkspaceTabId; label: string; available: boolean; h
     available: false,
     hint: "Open a process under Processes to view and add its captures",
   },
-  { id: "documentation", label: "Documentation", available: false },
+  {
+    id: "documentation",
+    label: "Documentation",
+    available: false,
+    hint: "Open a process under Processes, then use \"Export to Word\" in its Process draft section",
+  },
 ];
 
 export function ProjectWorkspace({

@@ -10,22 +10,33 @@ functional specification.
 
 ## Current status
 
-**Milestone M0 — Foundation.** GoLive can create, list, and delete
-**projects**; selecting one opens its **Project Workspace**, where its
-name/description can be edited and an Overview shows creation/update
-dates. Each project can now contain **processes** — the business
-workflows a consultant is documenting (e.g. "Create a sales order") —
-with their own create/list/select/edit/delete, a status
-(Draft / In progress / Completed), and a detail view. Everything persists
-locally in SQLite and survives application restarts; deleting a project
-also deletes its processes. The workspace still has "Captures" and
-"Documentation" reserved but clearly marked "Not available yet" — not
-implemented. The application shell has a sidebar (Projects / Settings), a
-header with a live backend connectivity indicator, and a Settings page
-showing local storage status. No capture/recording/AI/transcription/
-documentation-generation functionality exists yet. See
-[PROJECT_STATE.md](PROJECT_STATE.md) for the authoritative current state
-and [TASK_INDEX.md](TASK_INDEX.md) for what's planned next.
+**MVP complete (TASK-001 through TASK-021).** GoLive implements the full
+workflow its own product description promises: create a **project**,
+document a **process** within it, capture that process live — from
+anywhere in Windows, without switching to GoLive's main window — via a
+global hotkey and a small always-on-top floating widget, in every
+modality the product promises (screenshots, screen recordings with
+optional microphone audio, and one-click markers, plus ordinary typed
+notes from the main window), then turn those captures into a
+structured, AI-generated business process using OpenAI, edit that draft
+by hand, and export the result as a real Word (`.docx`) functional
+specification with embedded screenshots — via a native Save As dialog —
+that opens correctly in Microsoft Word.
+
+Everything persists locally in SQLite (and captured media alongside it
+on disk); deleting a project cascades to its processes, captures, and
+generated drafts. The OpenAI API key lives in the Windows Credential
+Manager only — never in GoLive's own database or any file it writes.
+GoLive keeps running in the system tray when its main window is closed;
+the tray is the one real way to quit.
+
+See [PROJECT_STATE.md](PROJECT_STATE.md) for the authoritative current
+state (including known limitations and technical risk), and
+[roadmap.md](roadmap.md) for how the project got here. Explicitly
+deferred beyond this MVP: full-text search, ZIP project import/export,
+monitor/area selection for capture, hotkey customization, recording
+pause/resume, and any AI provider other than OpenAI — see roadmap.md's
+"Explicitly deferred" section for the complete list and why.
 
 ## Development prerequisites
 

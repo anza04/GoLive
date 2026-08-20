@@ -4,19 +4,22 @@ Project:
 GoLive
 
 Current milestone:
-M3 — Export and MVP Completion (see roadmap.md; M1 — Live Capture and
-M2 — AI Structuring are both complete: TASK-010 through TASK-019 are
-all done and fully verified — including a real successful generation
-against the live OpenAI API, real cross-restart SQLite persistence, and
-real in-place editing verified against the actual database. TASK-020,
-M3's first step, is now also done — a real Process export opens
-correctly in Microsoft Word, verified directly — see below. TASK-021,
-the roadmap's final step, is next)
+**MVP complete.** M1 — Live Capture, M2 — AI Structuring, and M3 —
+Export and MVP Completion (see roadmap.md) are all done: TASK-001
+through TASK-021 are all done and fully verified, most recently by one
+full, unassisted manual pass through the entire consultant workflow in
+a single continuous session — create a project, live-capture a process
+via the widget (screenshot, marker, recording with audio), add a note,
+generate the AI structure, edit it, and export a real Word document
+through the native Save As dialog end to end, opened and visually
+confirmed in real Microsoft Word — see below. No task is queued next;
+further work would be a new, separately-scoped task continuing the same
+`TASK-0NN` sequence, not a reopening of anything above.
 
 Completed:
 TASK-001, TASK-002, TASK-003, TASK-004, TASK-005, TASK-006, TASK-007,
 TASK-008, TASK-009, TASK-010, TASK-011, TASK-012, TASK-013, TASK-014,
-TASK-015, TASK-016, TASK-017, TASK-018, TASK-019, TASK-020
+TASK-015, TASK-016, TASK-017, TASK-018, TASK-019, TASK-020, TASK-021
 
 ## Current implementation
 
@@ -875,6 +878,43 @@ TASK-015, TASK-016, TASK-017, TASK-018, TASK-019, TASK-020
     `target_path` only ever originates from the native Save As dialog,
     `DocxExportService::export` still validates it itself rather than
     trusting it just because of where it came from
+- **MVP end-to-end hardening and documentation (TASK-021)** — the
+  roadmap's final step; **the MVP is now complete** (see
+  docs/architecture.md §36, DECISIONS.md for the full reasoning):
+  - One full, unassisted manual pass through the entire consultant
+    workflow in a single continuous session, against a brand-new
+    project/process (not reused verification data): create project →
+    create process → live-capture via the widget (screenshot, marker,
+    recording with microphone audio) → a typed note → Generate → edit
+    the summary → Save → Export to Word through the real native Save As
+    dialog end to end, to a real file, opened and visually confirmed
+    correct in real Microsoft Word
+  - Two real issues found and fixed, both documentation/copy accuracy
+    bugs — no functional defects found, no new features added (in
+    scope): Settings' AI section no longer claims "No AI feature uses it
+    yet" (false since TASK-017); the Project Overview's "Documentation"
+    tile (which claimed Word export was still a future feature, false
+    since TASK-020) is removed the same way "Captures" was in the
+    earlier UI bugfix pass, and the disabled "Documentation" workspace
+    tab's tooltip now points at where the real feature actually lives
+    ("Open a process under Processes, then use 'Export to Word' in its
+    Process draft section") instead of the generic "Not available yet"
+  - Closed TASK-020's one remaining verification gap: the native Save
+    As dialog's own Save click is now confirmed driven end-to-end (not
+    just its correct pre-fill) — its filename/Save/Cancel controls turned
+    out to be plain `Pane` elements with no invokable UIA pattern;
+    clicking their real screen coordinates (the same raw-mouse-event
+    technique used since TASK-014) reliably drives them
+  - README.md's "Current status" rewritten in full (had drifted back to
+    describing M0); TASK_INDEX.md's table (stopped updating after
+    TASK-007, still showed TASK-008 as "TODO") now lists all 21 tasks
+    DONE; roadmap.md's own opening framing now states the MVP is
+    complete
+  - No Rust or TypeScript logic changed beyond copy/JSX text and one
+    now-empty array — `cargo test` (210/210) and `npx tsc --noEmit` both
+    simply re-confirm no regression; the real verification is the manual
+    pass and the two fixes, confirmed against a freshly built, freshly
+    launched `golive.exe` via Windows UI Automation
 
 ## Architecture conventions established (TASK-002)
 
@@ -1828,6 +1868,68 @@ regeneration and editing remain correctly independent operations in
 the real app, not just in tests against fakes. No verification gap
 remains for TASK-019.
 
+**TASK-020 validation:** `cargo check`/`cargo test` (210 passed — 6
+new, 3 ignored unchanged), `npx tsc --noEmit`, `npm run build`, and a
+full `npm run tauri build` all pass, producing a real
+`golive.exe`/NSIS installer. `services::docx_export`'s tests cover a
+missing version/process, a non-`.docx` target and a target whose parent
+directory doesn't exist (both rejected before any file write), a real
+export producing a file starting with the ZIP magic bytes, a step
+citing a real screenshot alongside a non-screenshot and a nonexistent
+capture id (export still succeeds), and image scaling never upscaling
+an already-narrow image.
+
+Beyond the automated tests, verified in two parts against the real
+running app and real data (see docs/architecture.md §35 for the full
+narrative): (1) clicking the real "Export to Word" button (Windows UI
+Automation, same technique as every native verification since TASK-016)
+genuinely opens the real, native OS Save As dialog, pre-filled with the
+correctly sanitized suggested filename and "Word Document" already
+selected — confirming the frontend-to-native-dialog wiring is real, not
+just compiling; the dialog's own internal controls resisted further
+reliable scripted automation, so the final "type a path, click Save"
+step through that specific dialog wasn't also driven this same way. (2)
+Separately, a temporary real-data example (deleted after use, same
+convention as every prior temporary example) called
+`DocxExportService::export` directly — the identical method the command
+calls — against the real database and a real screenshot Capture,
+producing a real 850KB `.docx`, independently confirmed as a
+well-formed ZIP/OOXML package (every expected part present, via .NET's
+own `ZipFile` reader), then opened in actual, installed Microsoft Word:
+title, "Functional Specification" subtitle, Summary section, and the
+embedded screenshot (correctly scaled, not overflowing the page) all
+visually confirmed rendering correctly. The one narrow remaining gap —
+driving the OS dialog's own Save click end-to-end rather than
+confirming its two halves separately — is low-risk, since
+`commands::export::export_process_version_to_docx` is a two-line
+delegation between the two already-confirmed halves.
+
+**TASK-021 validation:** `cargo test` (210/210, unchanged — no Rust
+code touched) and `npx tsc --noEmit` (clean) re-confirmed after the
+copy/JSX edits; a full `npm run tauri build` produced a fresh
+`golive.exe`/NSIS installer. The real verification was the manual pass
+itself, against that freshly built binary: created a brand-new project
+and process; used the floating widget to capture a screenshot, a
+marker, and a microphone-audio recording (all appeared live in the
+Captures list with no navigation needed); added a typed Note through
+the main window's "+ New capture" menu; clicked Generate and got a
+genuine, sensible OpenAI response reflecting the actual (mostly
+content-light) captures fed to it; edited the summary and Saved,
+confirmed by the UI's "· Edited …" timestamp; clicked Export to Word,
+drove the real native Save As dialog's Save button for real (via
+`BoundingRectangle`-derived screen coordinates, since its filename/Save
+controls exposed no invokable UIA pattern), and confirmed both the
+app's own "Exported to …" message and a real file on disk. Opened that
+file in the actual, installed Microsoft Word and visually confirmed
+correct rendering (this closed TASK-020's one remaining verification
+gap — see its entry above). Separately, both copy fixes (Settings' AI
+section, the Documentation tab's tooltip) and the Overview tile's
+removal were confirmed live in that same freshly launched app via
+Windows UI Automation (`ValuePattern`/`Name`/`HelpText` reads). No
+verification gap remains for TASK-021, or — with this pass explicitly
+exercising every feature built since TASK-001 together — for the MVP
+as a whole.
+
 ## Not implemented yet
 
 - Note capture media (Note Captures other than quick markers remain
@@ -1952,11 +2054,13 @@ task to touch this file should remove it.)
 
 ## Next task
 
-TASK-021 (see roadmap.md) — MVP end-to-end hardening and documentation:
-one full manual pass through the entire consultant workflow (create a
-project → live-capture a process via the hotkey/widget → generate the
-AI structure → edit it → export to Word), fixing real friction/
-inconsistency found along the way, then updating README.md's "Current
-status", PROJECT_STATE.md, and docs/architecture.md to describe a
-complete MVP. Depends on TASK-020 (done — every prior M1/M2/M3 step, in
-effect). No net-new features — the roadmap's final step.
+None queued — **the MVP is complete** (TASK-001 through TASK-021, all
+of roadmap.md's M1/M2/M3). Further work is not planned by any existing
+document; it would start as a new task brief (continuing the same
+`TASK-0NN` sequence) scoped from a genuinely new requirement — e.g. one
+of the "Explicitly deferred beyond this MVP" items roadmap.md already
+lists (full-text search, ZIP project import/export, monitor/area
+selection, hotkey customization, recording pause/resume, a second AI
+provider), or a "Known technical risks"/"Not implemented yet" item
+below that becomes worth addressing, or a genuinely new product
+direction — not by reopening anything already done.

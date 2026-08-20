@@ -117,8 +117,8 @@ export function SettingsPage() {
         <h2 className="settings-section__title">AI</h2>
         <p className="field__hint settings-section__intro">
           Your OpenAI API key is stored in the Windows Credential Manager —
-          never in GoLive's own database or any file it writes. No AI
-          feature uses it yet; this just saves it and confirms it works.
+          never in GoLive's own database or any file it writes. It's used to
+          generate and export each process's structured documentation.
         </p>
 
         {keyState.state === "loading" && <p className="projects-status">Checking…</p>}

@@ -3166,67 +3166,164 @@ non-screenshot and a nonexistent capture id (confirming the export
 still succeeds and doesn't fail over the two uncitable references), and
 `scaled_pic` leaving an already-narrow image's size untouched.
 
-Beyond the automated tests: exported a real Process's real
-generated-and-then-edited draft (at least one step citing a real
-screenshot Capture) through the actual running app's native Save As
-dialog (driven the same Windows UI Automation way as every native
-verification since §31 — `InvokePattern` to click Export, then the
-real, OS-native Save As dialog itself, filled and confirmed the same
-way), then opened the resulting `.docx` file directly in Microsoft Word
-and visually confirmed the title, "Functional Specification" subtitle,
-Summary section, numbered Process Steps with their titles/descriptions,
-and the embedded screenshot all render exactly as expected, at a
-readable, on-page size (not stretched off the page edge) — the specific,
-strongest-available proof of roadmap.md's own definition of done
+Beyond the automated tests: verified in two parts against the real
+running app and real data, not just fakes.
+
+*The dialog wiring.* Using the same Windows UI Automation technique as
+every native verification since §31: clicked the real "Export to Word"
+button in the real running app (a real Process with a real generated
+draft citing a real screenshot Capture). This genuinely opened the
+real, native OS Save As dialog — not a mock — pre-filled with the
+correctly sanitized suggested filename
+("Updated via verify_process_persistence") and "Word Document" already
+selected as the save type, confirming `services/export.ts` and the
+frontend button are wired to the real
+`@tauri-apps/plugin-dialog`/`export_process_version_to_docx` path, not
+just compiling. The dialog itself turned out to be a modern
+Explorer-hosted picker whose internal list/rename controls didn't
+respond reliably to further scripted `AutomationElement`
+interaction in this environment (an errant keystroke sequence briefly
+entered rename mode on an unrelated real folder in Documents — caught,
+escaped out of, and confirmed the folder's name was never actually
+changed, before continuing) — so the remaining "type a path, click
+Save" step through that specific dialog wasn't also completed this same
+way.
+
+*The document itself.* Verified separately and more directly: a
+temporary, real-data example (same "throwaway, deleted after use"
+convention as every prior temporary example this project has used, see
+§16/§31 for precedent) called `DocxExportService::export` directly
+against the real `golive.db` and the real screenshot Capture's PNG on
+disk — the identical service method `export_process_version_to_docx`
+calls, just invoked without the native dialog in between — producing a
+real 850KB `.docx`. That file was opened directly in the actual,
+installed Microsoft Word, where the title (the Process's own name),
+"Functional Specification" subtitle, Summary heading and text, and the
+embedded screenshot (rendering at a readable, on-page size, not
+stretched past the page edge) were all visually confirmed present and
+correctly formatted. Independently, the file's ZIP package structure
+was also verified with .NET's own `ZipFile` reader — confirming every
+expected OOXML part (`[Content_Types].xml`, `word/document.xml`,
+`word/media/rIdImage1.png`, etc.) is present and well-formed, not just
+that the file starts with the right magic bytes.
+
+Together these two checks cover roadmap.md's definition of done
 ("opens correctly in Microsoft Word... contains the expected structure
-and images"), not just "produces a well-formed ZIP" (which a test can
-already confirm on its own, but can't confirm Word actually accepts the
-OOXML inside it).
+and images") about as directly as this environment allows: the dialog
+that hands off a user-chosen path is confirmed real and correctly
+wired; the document that path receives is confirmed to actually open
+and render correctly in real Word. What wasn't independently re-driven
+end-to-end through the OS dialog's own Save click is the one
+narrow remaining gap — low-risk, since `commands::export`'s command
+function is a two-line delegation with nothing else in it to get wrong
+between the two halves already confirmed separately.
+
+## 36. MVP end-to-end hardening and documentation (TASK-021)
+
+**CURRENT.** The roadmap's final step: one full, unassisted manual pass
+through the entire consultant workflow in a single continuous session —
+create a project, document a process live via the widget (screenshot +
+marker + recording with microphone audio), add a typed note, generate
+the AI structure, edit it, save, and export to a real Word document
+through the native Save As dialog end to end — fixing whatever real
+friction the pass actually turned up, then bringing the project's own
+top-level documentation (README.md, TASK_INDEX.md, roadmap.md's own
+framing, this section) in line with a genuinely complete MVP rather than
+a foundation-in-progress. No new product capability was added; none was
+in scope.
+
+**What the pass found and fixed** (both documentation/copy accuracy
+bugs, not functional defects — see DECISIONS.md for the full reasoning):
+1. Settings' AI section still read "No AI feature uses it yet" —
+   accurate when TASK-016 wrote it, false since TASK-017. Reworded to
+   describe what the key is actually used for.
+2. The Project Overview's "Documentation" tile and the disabled
+   "Documentation" workspace tab still described Word export as an
+   unbuilt future feature — false since TASK-020. This is the same
+   "hierarchy hides a real feature" bug §30 already found and fixed once
+   for Captures; fixed the same way here: the Overview tile is removed
+   (Word export is real, just one level deeper — inside a Process's
+   "Process draft" section, not this project-level tile), and the
+   disabled tab's tooltip now says exactly where to find it instead of
+   the generic "Not available yet."
+
+**What the pass also closed:** TASK-020's one remaining verification
+gap — the native Save As dialog's own Save click hadn't been driven
+end-to-end, only confirmed to open correctly pre-filled. This session
+found the dialog's filename field and Save/Cancel controls are exposed
+as plain `Pane` elements with no invokable UIA pattern (inspected via a
+shallow `TreeWalker` traversal rather than the slow deep `FindAll` used
+the first time), and clicking their real screen coordinates (the same
+raw-mouse-event technique used since TASK-014) reliably drives them. A
+full run — clicking the real Export button on a freshly
+generated-and-edited draft, through the real dialog's Save button, to a
+real file confirmed on disk and by the app's own "Exported to …"
+message — now stands as complete for the whole export feature, not just
+its two halves separately (see the TASK-020 entry's "Update (TASK-021)"
+note in DECISIONS.md).
+
+**Documentation brought current.** README.md's "Current status" was
+rewritten in full (it had drifted all the way back to describing M0);
+TASK_INDEX.md's table, which had stopped being updated after TASK-007
+and still showed TASK-008 as "TODO," now lists all 21 tasks DONE;
+roadmap.md's own opening framing now states the MVP is complete rather
+than describing itself as an open plan.
+
+**Testing.** No Rust or TypeScript logic changed beyond copy/JSX text
+and one now-empty array, so `cargo test` (210/210, unchanged) and
+`npx tsc --noEmit` simply re-confirm no regression. The real
+verification for this task is the manual pass and the two fixes,
+confirmed against a freshly built, freshly launched `golive.exe` via
+Windows UI Automation: every capture modality created and appearing
+live in one session, a real OpenAI generation against genuinely fresh
+captures, a real edit-save, a real Word document produced through the
+real native dialog and opened in real Microsoft Word, the Settings copy
+fix read back via `ValuePattern`, the Documentation tab's new tooltip
+read back via `AutomationElement.Current.HelpText`, and the Overview
+tile's removal confirmed by its absence on a freshly created project.
 
 ## Status
 
-Reflects the state after **TASK-015, two rounds of UI bugfixes,
-TASK-016, TASK-017, TASK-018, TASK-019, and TASK-020**.
+**MVP complete.** Reflects the state after **TASK-001 through
+TASK-021** — every milestone in roadmap.md is done:
 
-**M1 — Live Capture is complete** — every capture modality the product
-description promises (screenshot, recording, audio, quick markers)
-exists and works, reachable from both the main window and the floating
-widget, and stays in sync between them live, including the global-hotkey
-path; the Captures section's creation controls are consolidated into
-one menu; the app doesn't overflow its own window down to its documented
-760px minimum; the widget's collapsed dot is confirmed by an actual
+**M1 — Live Capture** — every capture modality the product description
+promises (screenshot, recording, audio, quick markers) exists and
+works, reachable from both the main window and the floating widget, and
+stays in sync between them live, including the global-hotkey path; the
+Captures section's creation controls are consolidated into one menu;
+the app doesn't overflow its own window down to its documented 760px
+minimum; the widget's collapsed dot is confirmed by an actual
 screenshot to render as a genuine transparent circle. §30 has the
 second UI-bugfix pass's full diagnosis — the first pass, §29, shipped
 three fixes that didn't hold up under real testing, corrected there
 rather than just re-claimed.
 
-**M2 — AI Structuring is underway.** TASK-016: the user's OpenAI API
-key saves to (and reads from) the Windows Credential Manager, tests
-against the real OpenAI API, and clears — never touching SQLite or any
-file GoLive writes (§31). TASK-017: given a Process with real Captures,
-`generate_process_draft` sends them to OpenAI and returns a genuinely
-AI-structured draft — every layer of that pipeline, including a real
-successful generation with schema-conformant output, is confirmed
-working against the live OpenAI API and the real running app (§32).
-TASK-018: every generation persists as a `ProcessVersion`, and
-regenerating always creates a new one, never overwriting a previous
-one (§5's rule), confirmed not just by tests but by directly reading
-the real on-disk database after a real app restart (§33). TASK-019: a
-user can now generate, read, edit, save, and regenerate a Process's
-structured content entirely through the UI — editing updates a
-version's content in place, deliberately distinct from regeneration,
-which still always creates a new one; confirmed against the real
-running app and the real database the same way (§34). **M2 — AI
-Structuring is complete.**
+**M2 — AI Structuring** — the user's OpenAI API key saves to (and reads
+from) the Windows Credential Manager, tests against the real OpenAI
+API, and clears — never touching SQLite or any file GoLive writes
+(§31). Given a Process with real Captures, `generate_process_draft`
+sends them to OpenAI and returns a genuinely AI-structured draft —
+confirmed working against the live OpenAI API and the real running app
+(§32). Every generation persists as a `ProcessVersion`, and
+regenerating always creates a new one, never overwriting a previous one
+(§5's rule), confirmed by directly reading the real on-disk database
+after a real app restart (§33). A user can generate, read, edit, save,
+and regenerate a Process's structured content entirely through the UI —
+editing updates a version's content in place, deliberately distinct
+from regeneration (§34).
 
-**M3 — Export and MVP Completion is underway.** TASK-020: a Process's
-structured content now exports to a real `.docx` functional
-specification — title, summary, numbered steps, and screenshots embedded
-next to the step that cites them — written to a location the user picks
-via a native Save As dialog, confirmed opening correctly in Microsoft
-Word itself, not just producing a well-formed ZIP container (§35).
-**TASK-021 (MVP end-to-end hardening and documentation) is next** — the
-roadmap's final step, closing the loop on the full consultant workflow
-rather than adding new product capability. See
-[PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative current
-implementation status.
+**M3 — Export and MVP Completion** — a Process's structured content
+exports to a real `.docx` functional specification — title, summary,
+numbered steps, and screenshots embedded next to the step that cites
+them — written to a location the user picks via a native Save As
+dialog, confirmed end to end (dialog through to a real file, opened and
+visually confirmed correct in real Microsoft Word) (§35, §36). One full
+unassisted manual pass through the entire consultant workflow, in one
+continuous session, confirmed the whole product works together, not
+just each piece in isolation; the two real documentation-accuracy
+issues it found were fixed (§36).
+
+See [PROJECT_STATE.md](../PROJECT_STATE.md) for the authoritative
+current implementation status, including known limitations and
+technical risk carried forward past this MVP.

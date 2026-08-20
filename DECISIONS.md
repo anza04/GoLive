@@ -2351,9 +2351,120 @@ and contains the expected structure and images" — a claim only a real
 Word install can actually confirm (a malformed OOXML part can still be a
 technically-valid ZIP).
 **Consequence:** see docs/architecture.md §35 for the full verification
-narrative — exported a real Process's real generated-and-edited content
-(including at least one step citing a real screenshot Capture) through
-the actual running app's native Save As dialog, then opened the
-resulting file in Microsoft Word directly and visually confirmed the
-title, summary, numbered steps, and embedded image all render as
-expected.
+narrative — two parts, verified separately. First, against the actual
+running app: clicking "Export to Word" for real genuinely opens the
+real, native OS Save As dialog (not a mock), pre-filled with the
+correctly sanitized suggested filename and "Word Document" selected as
+the type — confirming the frontend-to-native-dialog wiring itself is
+real (the OS dialog's own list/rename controls turned out to resist
+reliable further scripted automation in this environment, so the
+click-through-to-Save step wasn't also driven this same way — see
+below). Second, and separately: a real `.docx` was produced by calling
+`DocxExportService::export` directly against the real database and a
+real screenshot Capture (the same production code path
+`export_process_version_to_docx` calls, just invoked without the native
+dialog in between) and then opened in the actual, installed Microsoft
+Word, where the title, "Functional Specification" subtitle, Summary
+section, and the embedded screenshot (correctly scaled, not overflowing
+the page) were all visually confirmed rendering correctly.
+
+**Update (TASK-021):** the one narrow gap this entry flagged — driving
+the OS Save As dialog's own Save click, not just confirming its correct
+pre-fill — was closed during TASK-021's full end-to-end pass. Inspecting
+the dialog's automation tree (`TreeWalker`, shallow breadth-first, rather
+than the slow/unreliable deep `FindAll(Descendants)` used the first
+time) revealed its filename field and Save/Cancel buttons are exposed as
+plain `Pane` elements with no standard invokable UIA pattern (a known
+quirk of this Explorer-hosted dialog) — clicking their real screen
+coordinates (computed from `BoundingRectangle`, the same raw-mouse-event
+technique this project has used since TASK-014's widget-drag
+verification) worked reliably. A full run — clicking the real "Export to
+Word" button on a freshly generated-and-edited draft, through the real
+native Save As dialog's Save button, to a real file landing at the
+chosen path, confirmed by the app's own "Exported to …" message — now
+stands as complete, closing the gap the TASK-020 entry above left open.
+
+## TASK-021 — MVP end-to-end hardening and documentation
+
+**Decision:** the full manual pass (create project → live-capture via
+the widget: screenshot + marker + recording with audio → a typed note →
+generate → edit → export) was driven against a brand-new project/process
+created fresh in this session, not reusing the `verify_process_persistence`
+data left over from earlier tasks' own verification.
+**Reason:** roadmap.md's definition of done is specifically about the
+workflow working "unassisted" end to end for a real user — reusing
+already-generated AI content or an already-populated capture list would
+have silently skipped over exactly the steps (a cold Generate call
+against fresh captures, a real widget-driven capture sequence) most
+likely to surface a real integration gap between two features built in
+separate tasks.
+**Consequence:** this is the first time in the project's history every
+single capture modality (screenshot, marker, recording+audio, note) was
+exercised back-to-back in one continuous session against one Process,
+immediately followed by a real Generate → edit → Save → Export chain —
+closer to how a real consultant would actually use GoLive in one sitting
+than any single prior task's own narrower verification.
+
+**Decision:** two real, concrete issues found during the pass were fixed
+— both documentation/copy accuracy bugs, not functional defects — and
+nothing else was changed.
+**Reason:** roadmap.md scopes this task to "fixing real issues found
+along the way... not adding new features," and both issues found were
+squarely in that lane:
+1. Settings' AI section still read "No AI feature uses it yet; this just
+   saves it and confirms it works" — true when TASK-016 wrote it, false
+   since TASK-017 wired real generation up. A user reading Settings today
+   would be told, incorrectly, that saving a key does nothing yet.
+2. The Project Overview's "Documentation" tile and the disabled
+   "Documentation" workspace tab both still described Word export as a
+   future, unbuilt feature ("Generate the final process documentation.")
+   — false since TASK-020. This is the exact same "hierarchy hides a
+   real feature" bug §30/DECISIONS.md's "Second UI bugfix pass" already
+   found and fixed once for Captures; the same fix shape applies:
+   Documentation is fully real, just one level deeper (inside a
+   Process's "Process draft" section) than this project-level tile
+   implies.
+**Consequence:** (1) reworded to reflect that the key is actually used,
+without overselling what "generate and export" cover. (2) the
+Overview's "Documentation" placeholder tile is removed entirely (mirrors
+how "Captures" was removed the same way, not hidden differently), and
+the disabled "Documentation" tab gained a specific hint — "Open a
+process under Processes, then use 'Export to Word' in its Process draft
+section" — instead of the generic "Not available yet" every other
+disabled tab uses, matching the Captures tab's own precedent exactly.
+No backend change, no new Rust/TypeScript surface — purely corrected
+copy and one now-empty array.
+
+**Decision:** README.md's "Current status" section was rewritten in
+full, not incrementally patched — it had drifted all the way back to
+describing M0 (TASK-005/006-era functionality only), the single most
+stale piece of documentation in the whole project by the time this task
+started.
+**Reason:** TASK_INDEX.md's own drift (still showing TASK-008 as "TODO"
+with everything after it entirely missing from the table) was flagged by
+roadmap.md itself as a known, expected staleness to "reconcile... the
+next time it's touched" — this task is that next time for both files,
+and by that point a full rewrite was less risky than trying to track
+exactly which older sentences were still individually true.
+**Consequence:** README.md now describes the actual, complete MVP
+workflow end to end in one paragraph, and TASK_INDEX.md's table now
+lists all 21 tasks as DONE, matching PROJECT_STATE.md's own "Completed"
+list rather than contradicting it.
+
+**Decision:** verified with the same real-native-app-plus-real-database
+standard every task since TASK-016 has used, not a lighter pass just
+because this task's own diff is small.
+**Reason:** this task's entire purpose is confirming the *whole*
+product works together, not any one new piece in isolation — a claim
+that specifically calls for exercising the real, compiled application,
+not a mocked harness or a code-review-only pass.
+**Consequence:** the two copy fixes were confirmed live in a freshly
+built, freshly launched `golive.exe` via Windows UI Automation (the
+Settings section's new sentence read back correctly via `ValuePattern`/
+`Name`; the Documentation tab's new tooltip read back via
+`AutomationElement.Current.HelpText`, and the Overview tile's removal
+confirmed by its absence from a fresh project's Overview) — on top of
+the full manual workflow pass described above, which used the same
+already-built binary. `cargo test` (210/210, unchanged — no Rust code
+was touched this task) and `npx tsc --noEmit` both re-confirmed clean
+after the copy/JSX edits.
